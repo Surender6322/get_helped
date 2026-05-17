@@ -1,0 +1,63 @@
+rules_version = '2';
+
+// Firestore security rules for GetHelped.
+// Notes:
+//  - User profiles live in /users/{uid}.
+//  - Only admins can flip the `verified` flag on helpers.
+//  - Chats are accessible only to the involved user and helper.
+//  - Mood entries are private to their owner.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data;
+    }
+    function isAdmin() {
+      return isSignedIn() && userDoc(request.auth.uid).role == 'admin';
+    }
+
+    // -------- users --------
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      // Allow self-registration where uid == auth.uid and role is one of user/helper.
+      allow create: if isSelf(uid)
+        && request.resource.data.role in ['user', 'helper']
+        && request.resource.data.uid == uid;
+      // Self-update of profile fields, but never role/verified.
+      allow update: if (isSelf(uid)
+                        && !('role' in request.resource.data.diff(resource.data).affectedKeys())
+                        && !('verified' in request.resource.data.diff(resource.data).affectedKeys()))
+                    || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // -------- chats --------
+    match /chats/{chatId} {
+      allow read, update: if isSignedIn()
+        && (request.auth.uid == resource.data.userUid
+            || request.auth.uid == resource.data.helperUid);
+      allow create: if isSignedIn()
+        && request.resource.data.userUid == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    // -------- moods --------
+    match /moods/{moodId} {
+      allow read, delete: if isSignedIn() && request.auth.uid == resource.data.uid;
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+    }
+
+    // -------- resources --------
+    match /resources/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
