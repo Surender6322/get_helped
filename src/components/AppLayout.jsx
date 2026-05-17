@@ -21,7 +21,25 @@ export default function AppLayout() {
   const [chats, setChats] = useState([]);
   const [, setUnreadTick] = useState(0);
   const [permission, setPermission] = useState(getNotificationPermission());
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const lastNotifiedRef = useRef({}); // { chatId: lastMessageTs }
+
+  // Auto-close the mobile drawer on every route change.
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  // Lock body scroll while drawer is open so the page underneath doesn't
+  // scroll along with the menu.
+  useEffect(() => {
+    if (mobileNavOpen) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [mobileNavOpen]);
 
   useEffect(() => watchChatsFor(user.uid, setChats), [user.uid]);
   useEffect(() => subscribeUnread(() => setUnreadTick((t) => t + 1)), []);
@@ -81,7 +99,39 @@ export default function AppLayout() {
 
   return (
     <div className="shell">
-      <aside className="sidebar">
+      <header className="mobile-topbar">
+        <button
+          type="button"
+          className="hamburger"
+          aria-label="Open navigation"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          <span /><span /><span />
+        </button>
+        <div className="logo logo-compact">
+          <Logo />
+          GetHelped
+        </div>
+        {unread > 0 && (
+          <span className="nav-badge" style={{ marginLeft: 'auto' }}>{unread}</span>
+        )}
+      </header>
+
+      <div
+        className={`mobile-overlay ${mobileNavOpen ? 'open' : ''}`}
+        onClick={() => setMobileNavOpen(false)}
+        aria-hidden="true"
+      />
+
+      <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`}>
+        <button
+          type="button"
+          className="sidebar-close"
+          aria-label="Close navigation"
+          onClick={() => setMobileNavOpen(false)}
+        >
+          ×
+        </button>
         <div className="logo">
           <Logo />
           GetHelped
