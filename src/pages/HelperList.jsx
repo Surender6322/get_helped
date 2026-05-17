@@ -10,6 +10,7 @@ export default function HelperList() {
   const [anon, setAnon] = useState(false);
   const [activeTags, setActiveTags] = useState([]);
   const [busy, setBusy] = useState(null);
+  const [startError, setStartError] = useState('');
   const navigate = useNavigate();
 
   useEffect(
@@ -30,6 +31,7 @@ export default function HelperList() {
 
   const start = async (helper) => {
     setBusy(helper.uid);
+    setStartError('');
     try {
       const chat = await startOrGetChat({
         userUid: user.uid,
@@ -37,6 +39,13 @@ export default function HelperList() {
         anonymous: anon,
       });
       navigate(`/app/chat/${chat.id}`);
+    } catch (e) {
+      console.error('Failed to start chat:', e);
+      setStartError(
+        e?.code === 'permission-denied'
+          ? "Couldn't start the chat — please refresh the page and try again. If it keeps happening, sign out and back in."
+          : `Couldn't start the chat: ${e?.message || 'unknown error'}`
+      );
     } finally {
       setBusy(null);
     }
@@ -59,6 +68,12 @@ export default function HelperList() {
           Talk anonymously
         </label>
       </div>
+
+      {startError && (
+        <div className="pill pill-danger" style={{ marginBottom: 12, display: 'inline-block' }}>
+          {startError}
+        </div>
+      )}
 
       <div className="card mb-4">
         <div className="card-h">

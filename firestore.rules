@@ -34,7 +34,15 @@ service cloud.firestore {
 
     // -------- chats --------
     match /chats/{chatId} {
-      allow read, update: if isSignedIn()
+      // Allow read on a non-existent doc (resource == null) so the
+      // deterministic-id lookup in startOrGetChat() can probe before
+      // creating. Listing/querying still requires the doc to exist
+      // and the participant predicate to hold.
+      allow read: if isSignedIn()
+        && (resource == null
+            || request.auth.uid == resource.data.userUid
+            || request.auth.uid == resource.data.helperUid);
+      allow update: if isSignedIn()
         && (request.auth.uid == resource.data.userUid
             || request.auth.uid == resource.data.helperUid);
       allow create: if isSignedIn()
