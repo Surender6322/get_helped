@@ -2,10 +2,18 @@
   "rules": {
     "messages": {
       "$chatId": {
-        ".read":  "auth != null && root.child('users').child(auth.uid).exists() && (root.child('chats').child($chatId).child('userUid').val() === auth.uid || root.child('chats').child($chatId).child('helperUid').val() === auth.uid)",
+        ".read":  "auth != null && (root.child('chats').child($chatId).child('userUid').val() === auth.uid || root.child('chats').child($chatId).child('helperUid').val() === auth.uid)",
         ".write": "auth != null && (root.child('chats').child($chatId).child('userUid').val() === auth.uid || root.child('chats').child($chatId).child('helperUid').val() === auth.uid)",
         "$msgId": {
           ".validate": "newData.hasChildren(['from','text','ts']) && newData.child('from').val() === auth.uid && newData.child('text').isString() && newData.child('text').val().length > 0 && newData.child('text').val().length < 2000"
+        }
+      }
+    },
+    "typing": {
+      "$chatId": {
+        ".read":  "auth != null && (root.child('chats').child($chatId).child('userUid').val() === auth.uid || root.child('chats').child($chatId).child('helperUid').val() === auth.uid)",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && (root.child('chats').child($chatId).child('userUid').val() === auth.uid || root.child('chats').child($chatId).child('helperUid').val() === auth.uid)"
         }
       }
     }

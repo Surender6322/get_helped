@@ -1,13 +1,83 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import { useTheme } from '../context/ThemeContext.jsx';
+import { watchChatsFor, isDemo } from '../services/api.js';
+import { countUnreadChats, subscribeUnread, getLastReadTs } from '../utils/unread.js';
+import {
+  getNotificationPermission,
+  notificationsSupported,
+  requestNotificationPermission,
+  notify,
+} from '../utils/notifications.js';
 import EmergencyButton from './EmergencyButton.jsx';
-import { isDemo } from '../services/api.js';
+import ToastHost from './ToastHost.jsx';
 
 export default function AppLayout() {
   const { user, logout } = useAuth();
+  const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [chats, setChats] = useState([]);
+  const [, setUnreadTick] = useState(0);
+  const [permission, setPermission] = useState(getNotificationPermission());
+  const lastNotifiedRef = useRef({}); // { chatId: lastMessageTs }
 
-  const links = navLinksFor(user.role);
+  useEffect(() => watchChatsFor(user.uid, setChats), [user.uid]);
+  useEffect(() => subscribeUnread(() => setUnreadTick((t) => t + 1)), []);
+
+  // Notify on new incoming messages in chats the user isn't currently viewing.
+  useEffect(() => {
+    for (const c of chats) {
+      const ts = typeof c.lastTs?.toMillis === 'function' ? c.lastTs.toMillis() : c.lastTs;
+      if (!ts || !c.lastMessage) continue;
+
+      // Initialize seen-baseline from the unread tracker the *first* time we
+      // observe a chat — without this, every chat would fire a notification
+      // on first sidebar-load.
+      if (lastNotifiedRef.current[c.id] == null) {
+        lastNotifiedRef.current[c.id] = Math.max(ts, getLastReadTs(user.uid, c.id));
+        continue;
+      }
+      if (ts <= lastNotifiedRef.current[c.id]) continue;
+
+      // Skip if the message is from us, or if we're currently viewing this chat.
+      if (c.lastFrom === user.uid) {
+        lastNotifiedRef.current[c.id] = ts;
+        continue;
+      }
+      const onActiveChat = location.pathname.endsWith(`/chat/${c.id}`);
+      if (onActiveChat) {
+        lastNotifiedRef.current[c.id] = ts;
+        continue;
+      }
+
+      lastNotifiedRef.current[c.id] = ts;
+      const target = user.role === 'helper' ? '/helper/chat' : '/app/chat';
+      notify({
+        title: 'New message on GetHelped',
+        body: c.lastMessage.length > 80 ? c.lastMessage.slice(0, 77) + '…' : c.lastMessage,
+        onClick: () => navigate(`${target}/${c.id}`),
+      });
+    }
+  }, [chats, user.uid, user.role, location.pathname, navigate]);
+
+  const askPermission = async () => {
+    const r = await requestNotificationPermission();
+    setPermission(r);
+  };
+
+  const showPermissionPrompt =
+    notificationsSupported() &&
+    permission === 'default' &&
+    chats.length > 0;
+
+  const unread = countUnreadChats(user.uid, chats);
+
+  const links = navLinksFor(user.role).map((l) => ({
+    ...l,
+    badge: l.unreadEligible ? unread : 0,
+  }));
 
   return (
     <div className="shell">
@@ -19,7 +89,10 @@ export default function AppLayout() {
         <nav>
           {links.map((l) => (
             <NavLink key={l.to} to={l.to} end={l.end}>
-              {l.label}
+              <span style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+                <span>{l.label}</span>
+                {l.badge > 0 && <span className="nav-badge">{l.badge}</span>}
+              </span>
             </NavLink>
           ))}
         </nav>
@@ -45,6 +118,15 @@ export default function AppLayout() {
           >
             Sign out
           </button>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggle}
+            aria-label="Toggle theme"
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}
+          </button>
           {isDemo && (
             <div style={{ marginTop: 12, fontSize: 11 }}>
               <span className="pill pill-warn">DEMO MODE</span>
@@ -54,8 +136,19 @@ export default function AppLayout() {
       </aside>
       <main className="main">
         <EmergencyButton />
+        {showPermissionPrompt && (
+          <div className="notif-prompt">
+            <span>
+              <strong>Get pinged</strong> when a helper or user messages you, even when this tab is in the background.
+            </span>
+            <button className="btn btn-primary btn-sm" onClick={askPermission}>
+              Enable notifications
+            </button>
+          </div>
+        )}
         <Outlet />
       </main>
+      <ToastHost />
     </div>
   );
 }
@@ -65,8 +158,12 @@ function navLinksFor(role) {
     return [
       { to: '/app', label: 'Dashboard', end: true },
       { to: '/app/helpers', label: 'Find a Helper' },
-      { to: '/app/chat', label: 'My Chats' },
+      { to: '/app/chat', label: 'My Chats', unreadEligible: true },
+      { to: '/app/companion', label: 'AI Companion' },
+      { to: '/app/wall', label: 'Wall of Support' },
+      { to: '/app/journal', label: 'Journal' },
       { to: '/app/mood', label: 'Mood Tracker' },
+      { to: '/app/safety-plan', label: 'Safety Plan' },
       { to: '/app/resources', label: 'Resources' },
       { to: '/app/profile', label: 'Profile' },
     ];
@@ -74,7 +171,8 @@ function navLinksFor(role) {
   if (role === 'helper') {
     return [
       { to: '/helper', label: 'Dashboard', end: true },
-      { to: '/helper/chat', label: 'Active Chats' },
+      { to: '/helper/chat', label: 'Active Chats', unreadEligible: true },
+      { to: '/helper/wall', label: 'Wall of Support' },
       { to: '/helper/resources', label: 'Resources' },
       { to: '/helper/profile', label: 'Profile' },
     ];

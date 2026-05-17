@@ -1,11 +1,6 @@
 rules_version = '2';
 
 // Firestore security rules for GetHelped.
-// Notes:
-//  - User profiles live in /users/{uid}.
-//  - Only admins can flip the `verified` flag on helpers.
-//  - Chats are accessible only to the involved user and helper.
-//  - Mood entries are private to their owner.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -26,7 +21,6 @@ service cloud.firestore {
     // -------- users --------
     match /users/{uid} {
       allow read: if isSignedIn();
-      // Allow self-registration where uid == auth.uid and role is one of user/helper.
       allow create: if isSelf(uid)
         && request.resource.data.role in ['user', 'helper']
         && request.resource.data.uid == uid;
@@ -48,10 +42,64 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // -------- moods --------
+    // -------- moods (private) --------
     match /moods/{moodId} {
       allow read, delete: if isSignedIn() && request.auth.uid == resource.data.uid;
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+    }
+
+    // -------- journal (private) --------
+    match /journal/{entryId} {
+      allow read, delete, update: if isSignedIn() && request.auth.uid == resource.data.uid;
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+    }
+
+    // -------- safety plans (private to owner) --------
+    match /safetyPlans/{uid} {
+      allow read, write: if isSelf(uid);
+    }
+
+    // -------- wall posts (community feed) --------
+    // Anyone signed in can read. Authors can create their own; only the
+    // author or an admin can edit / delete. Heart toggle is allowed for
+    // any signed-in user (we limit it to the heartUids/hearts fields).
+    match /wallPosts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 1000;
+      allow update: if isSignedIn()
+                    && (
+                      // Author can edit own post fields except hearts/heartUids
+                      (request.auth.uid == resource.data.uid
+                        && !('uid' in request.resource.data.diff(resource.data).affectedKeys()))
+                      // Anyone can toggle heart fields only
+                      || request.resource.data.diff(resource.data).affectedKeys()
+                          .hasOnly(['hearts','heartUids'])
+                      || isAdmin()
+                    );
+      allow delete: if isSignedIn() && (request.auth.uid == resource.data.uid || isAdmin());
+
+      match /replies/{replyId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.body is string
+          && request.resource.data.body.size() <= 500;
+        allow delete: if isSignedIn() && (request.auth.uid == resource.data.uid || isAdmin());
+      }
+    }
+
+    // -------- helper ratings (anonymous to helper, only admin can read in aggregate) --------
+    match /ratings/{ratingId} {
+      // Helpers can read their own ratings (without seeing fromUid? — for simplicity we let them see all fields).
+      allow read: if isSignedIn() && (request.auth.uid == resource.data.helperUid || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.stars is int
+        && request.resource.data.stars >= 1
+        && request.resource.data.stars <= 5;
     }
 
     // -------- resources --------

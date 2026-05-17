@@ -11,6 +11,10 @@ import Resources from './pages/Resources.jsx';
 import Mood from './pages/Mood.jsx';
 import Profile from './pages/Profile.jsx';
 import HelperList from './pages/HelperList.jsx';
+import Wall from './pages/Wall.jsx';
+import Journal from './pages/Journal.jsx';
+import SafetyPlan from './pages/SafetyPlan.jsx';
+import Companion from './pages/Companion.jsx';
 import AppLayout from './components/AppLayout.jsx';
 
 function Protected({ children, role }) {
@@ -49,7 +53,11 @@ export default function App() {
         <Route path="helpers" element={<HelperList />} />
         <Route path="chat" element={<Chat />} />
         <Route path="chat/:chatId" element={<Chat />} />
+        <Route path="wall" element={<Wall />} />
+        <Route path="journal" element={<Journal />} />
+        <Route path="companion" element={<Companion />} />
         <Route path="mood" element={<Mood />} />
+        <Route path="safety-plan" element={<SafetyPlan />} />
         <Route path="resources" element={<Resources />} />
         <Route path="profile" element={<Profile />} />
       </Route>
@@ -65,6 +73,7 @@ export default function App() {
         <Route index element={<HelperDashboard />} />
         <Route path="chat" element={<Chat />} />
         <Route path="chat/:chatId" element={<Chat />} />
+        <Route path="wall" element={<Wall />} />
         <Route path="resources" element={<Resources />} />
         <Route path="profile" element={<Profile />} />
       </Route>

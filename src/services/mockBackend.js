@@ -66,6 +66,11 @@ const seed = () => ({
   messages: {
     // chatId: [ { id, from, text, ts } ]
   },
+  wallPosts: [],
+  wallReplies: {}, // { postId: [reply,...] }
+  journal: [],
+  safetyPlans: {}, // { uid: plan }
+  ratings: [],
   resources: [
     {
       id: 'r1',
@@ -140,7 +145,7 @@ function save(state) {
   window.dispatchEvent(new Event('gethelped:db-updated'));
 }
 
-function uid(prefix = 'id') {
+function genId(prefix = 'id') {
   return prefix + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
@@ -260,6 +265,36 @@ async function setHelperAvailability(helperUid, available) {
   return updateProfile(helperUid, { available });
 }
 
+function findUserByEmail(email) {
+  const state = load();
+  const u = state.users.find((x) => x.email.toLowerCase() === email.toLowerCase());
+  return u ? sanitize(u) : null;
+}
+
+function listAdmins() {
+  return load()
+    .users.filter((u) => u.role === 'admin')
+    .map(sanitize);
+}
+
+async function setUserRole(uid, role) {
+  if (!['user', 'helper', 'admin'].includes(role)) throw new Error('Invalid role.');
+  return updateProfile(uid, { role });
+}
+
+async function changePassword({ currentPassword, newPassword }) {
+  const session = getSession();
+  if (!session) throw new Error('Not signed in.');
+  const state = load();
+  const u = state.users.find((x) => x.uid === session.uid);
+  if (!u) throw new Error('Account not found.');
+  if (u.password !== currentPassword) throw new Error('Current password is incorrect.');
+  if (!newPassword || newPassword.length < 6)
+    throw new Error('New password must be at least 6 characters.');
+  u.password = newPassword;
+  save(state);
+}
+
 // --- Mood ---
 
 async function addMood({ uid: userUid, mood, note }) {
@@ -282,7 +317,7 @@ async function startOrGetChat({ userUid, helperUid, anonymous }) {
   let chat = state.chats.find((c) => c.userUid === userUid && c.helperUid === helperUid);
   if (!chat) {
     chat = {
-      id: uid('chat'),
+      id: genId('chat'),
       userUid,
       helperUid,
       anonymous: !!anonymous,
@@ -312,18 +347,149 @@ function listMessages(chatId) {
   return state.messages[chatId] || [];
 }
 
+// --- Typing indicator (ephemeral, not persisted) ---
+
+const typingState = {}; // { [chatId]: { [uid]: ts } }
+
+function setTyping({ chatId, uid, typing }) {
+  if (!typingState[chatId]) typingState[chatId] = {};
+  if (typing) typingState[chatId][uid] = Date.now();
+  else delete typingState[chatId][uid];
+  // notify subscribers in the same tab
+  window.dispatchEvent(new Event('gethelped:db-updated'));
+}
+
+function listTypingExcept({ chatId, exceptUid }) {
+  const m = typingState[chatId] || {};
+  return Object.entries(m)
+    .filter(([uid, ts]) => uid !== exceptUid && Date.now() - ts < 6000)
+    .map(([uid]) => uid);
+}
+
 async function sendMessage({ chatId, from, text }) {
   const state = load();
   if (!state.messages[chatId]) state.messages[chatId] = [];
-  const msg = { id: uid('m'), from, text, ts: Date.now() };
+  const msg = { id: genId('m'), from, text, ts: Date.now() };
   state.messages[chatId].push(msg);
   const chat = state.chats.find((c) => c.id === chatId);
   if (chat) {
     chat.lastMessage = text;
     chat.lastTs = msg.ts;
+    chat.lastFrom = from;
   }
   save(state);
   return msg;
+}
+
+// --- Wall of Support ---
+
+function createWallPost({ uid, body, kind = 'vent' }) {
+  const state = load();
+  const post = {
+    id: genId('wp'),
+    uid,
+    body,
+    kind,
+    hearts: 0,
+    heartUids: [],
+    ts: Date.now(),
+  };
+  state.wallPosts.push(post);
+  save(state);
+  return post.id;
+}
+
+function listWallPosts() {
+  return [...(load().wallPosts || [])].sort((a, b) => b.ts - a.ts);
+}
+
+function toggleHeartWallPost({ postId, uid }) {
+  const state = load();
+  const p = state.wallPosts.find((x) => x.id === postId);
+  if (!p) return;
+  if (!Array.isArray(p.heartUids)) p.heartUids = [];
+  const has = p.heartUids.includes(uid);
+  if (has) {
+    p.heartUids = p.heartUids.filter((u) => u !== uid);
+    p.hearts = Math.max(0, (p.hearts || 0) - 1);
+  } else {
+    p.heartUids.push(uid);
+    p.hearts = (p.hearts || 0) + 1;
+  }
+  save(state);
+}
+
+function addWallReply({ postId, uid, body }) {
+  const state = load();
+  if (!state.wallReplies) state.wallReplies = {};
+  if (!state.wallReplies[postId]) state.wallReplies[postId] = [];
+  state.wallReplies[postId].push({
+    id: genId('wr'),
+    uid,
+    body,
+    ts: Date.now(),
+  });
+  save(state);
+}
+
+function listWallReplies(postId) {
+  return (load().wallReplies?.[postId] || []).sort((a, b) => a.ts - b.ts);
+}
+
+// --- Journal ---
+
+function addJournalEntry({ uid, body, mood, tags }) {
+  const state = load();
+  if (!state.journal) state.journal = [];
+  state.journal.push({
+    id: genId('j'),
+    uid,
+    body,
+    mood: mood || null,
+    tags: tags || [],
+    ts: Date.now(),
+  });
+  save(state);
+}
+
+function listJournalEntries(uid) {
+  return (load().journal || [])
+    .filter((j) => j.uid === uid)
+    .sort((a, b) => b.ts - a.ts);
+}
+
+// --- Safety plan ---
+
+function saveSafetyPlan({ uid, plan }) {
+  const state = load();
+  if (!state.safetyPlans) state.safetyPlans = {};
+  state.safetyPlans[uid] = { uid, ...plan, updatedAt: Date.now() };
+  save(state);
+}
+
+function getSafetyPlan(uid) {
+  return load().safetyPlans?.[uid] || null;
+}
+
+// --- Helper ratings ---
+
+function rateHelper({ helperUid, fromUid, chatId, stars, note }) {
+  const state = load();
+  if (!state.ratings) state.ratings = [];
+  state.ratings.push({
+    id: genId('rt'),
+    helperUid,
+    fromUid,
+    chatId,
+    stars,
+    note: note || '',
+    ts: Date.now(),
+  });
+  save(state);
+}
+
+function listRatingsFor(helperUid) {
+  return (load().ratings || []).filter((r) => r.helperUid === helperUid);
 }
 
 // --- Resources ---
@@ -355,8 +521,12 @@ export const mock = {
   updateProfile,
   listHelpers,
   listAllHelpers,
+  listAdmins,
   setHelperVerification,
   setHelperAvailability,
+  findUserByEmail,
+  setUserRole,
+  changePassword,
   // mood
   addMood,
   listMoods,
@@ -365,6 +535,20 @@ export const mock = {
   listChatsFor,
   listMessages,
   sendMessage,
+  setTyping,
+  listTypingExcept,
+  // wall / journal / safety / ratings
+  createWallPost,
+  listWallPosts,
+  toggleHeartWallPost,
+  addWallReply,
+  listWallReplies,
+  addJournalEntry,
+  listJournalEntries,
+  saveSafetyPlan,
+  getSafetyPlan,
+  rateHelper,
+  listRatingsFor,
   // resources / lookups
   listResources,
   getHelplines,

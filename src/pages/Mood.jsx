@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { addMood, watchMoods } from '../services/api.js';
+import MoodChart from '../components/MoodChart.jsx';
 
 const moods = [
   { key: 'great', emoji: '😄', label: 'Great' },
@@ -37,6 +38,11 @@ export default function Mood() {
           <h1>Mood tracker</h1>
           <p>Logging how you feel — even briefly — helps you spot patterns over time.</p>
         </div>
+      </div>
+
+      <div className="card mb-4">
+        <div className="card-h"><h3>30-day trend</h3></div>
+        <MoodChart entries={history} />
       </div>
 
       <div className="grid grid-2">

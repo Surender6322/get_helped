@@ -6,6 +6,9 @@ import {
   signInWithEmailAndPassword,
   signOut as fbSignOut,
   onAuthStateChanged,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  updatePassword,
 } from 'firebase/auth';
 import {
   doc,
@@ -27,6 +30,7 @@ import {
   push,
   onValue,
   set,
+  remove,
   off,
 } from 'firebase/database';
 
@@ -95,6 +99,38 @@ export async function getUser(uid) {
   return snap.exists() ? snap.data() : null;
 }
 
+export async function findUserByEmail(email) {
+  if (isDemo) return mock.findUserByEmail(email);
+  const q = query(collection(db, 'users'), where('email', '==', email));
+  const snap = await getDocs(q);
+  return snap.empty ? null : snap.docs[0].data();
+}
+
+export async function setUserRole(uid, role) {
+  if (isDemo) return mock.setUserRole(uid, role);
+  await updateDoc(doc(db, 'users', uid), { role });
+  const snap = await getDoc(doc(db, 'users', uid));
+  return snap.data();
+}
+
+// Password change — requires reauth in real Firebase. In demo mode the
+// mock backend does an in-memory check.
+export async function changePassword({ currentPassword, newPassword }) {
+  if (isDemo) return mock.changePassword({ currentPassword, newPassword });
+  const u = auth.currentUser;
+  if (!u || !u.email) throw new Error('Not signed in.');
+  const cred = EmailAuthProvider.credential(u.email, currentPassword);
+  try {
+    await reauthenticateWithCredential(u, cred);
+  } catch (e) {
+    if (e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential') {
+      throw new Error('Current password is incorrect.');
+    }
+    throw e;
+  }
+  await updatePassword(u, newPassword);
+}
+
 // ----------------- Helpers -----------------
 
 export function watchHelpers(cb, opts = { verifiedOnly: true, availableOnly: false }) {
@@ -119,6 +155,17 @@ export function watchAllHelpers(cb) {
     return unsub;
   }
   const q = query(collection(db, 'users'), where('role', '==', 'helper'));
+  return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
+}
+
+export function watchAdmins(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listAdmins());
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'users'), where('role', '==', 'admin'));
   return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
 }
 
@@ -224,7 +271,171 @@ export async function sendMessage({ chatId, from, text }) {
   const newRef = push(r);
   await set(newRef, { from, text, ts: Date.now() });
   // also bump lastMessage on chat doc
-  await updateDoc(doc(db, 'chats', chatId), { lastMessage: text, lastTs: serverTimestamp() });
+  await updateDoc(doc(db, 'chats', chatId), {
+    lastMessage: text,
+    lastTs: serverTimestamp(),
+    lastFrom: from,
+  });
+}
+
+// ----------------- Typing indicator -----------------
+
+// We write the *timestamp* of last activity at /typing/{chatId}/{uid}.
+// Subscribers consider the user "typing" if their timestamp is within
+// the last 6 seconds. The sender clears the entry on stop or unmount.
+
+export async function setTyping({ chatId, uid, typing }) {
+  if (isDemo) return mock.setTyping({ chatId, uid, typing });
+  const r = rtdbRef(rtdb, `typing/${chatId}/${uid}`);
+  if (typing) await set(r, Date.now());
+  else await remove(r);
+}
+
+export function watchTyping({ chatId, exceptUid }, cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listTypingExcept({ chatId, exceptUid }));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const r = rtdbRef(rtdb, `typing/${chatId}`);
+  const handler = onValue(r, (snap) => {
+    const val = snap.val() || {};
+    const fresh = Object.entries(val)
+      .filter(([uid, ts]) => uid !== exceptUid && Date.now() - ts < 6000)
+      .map(([uid]) => uid);
+    cb(fresh);
+  });
+  return () => off(r, 'value', handler);
+}
+
+// ----------------- Wall of Support (anonymous community feed) -----------------
+
+export async function createWallPost({ uid, body, kind = 'vent' }) {
+  if (isDemo) return mock.createWallPost({ uid, body, kind });
+  const ref = await addDoc(collection(db, 'wallPosts'), {
+    uid, body, kind,
+    hearts: 0,
+    heartUids: [],
+    ts: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export function watchWallPosts(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listWallPosts());
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'wallPosts'), orderBy('ts', 'desc'));
+  return onSnapshot(q, (snap) =>
+    cb(
+      snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        ts: d.data().ts?.toMillis?.() ?? Date.now(),
+      }))
+    )
+  );
+}
+
+export async function toggleHeartWallPost({ postId, uid }) {
+  if (isDemo) return mock.toggleHeartWallPost({ postId, uid });
+  const ref = doc(db, 'wallPosts', postId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+  const data = snap.data();
+  const heartUids = Array.isArray(data.heartUids) ? data.heartUids : [];
+  const has = heartUids.includes(uid);
+  await updateDoc(ref, {
+    heartUids: has ? heartUids.filter((u) => u !== uid) : [...heartUids, uid],
+    hearts: has ? Math.max(0, (data.hearts || 0) - 1) : (data.hearts || 0) + 1,
+  });
+}
+
+export async function addWallReply({ postId, uid, body }) {
+  if (isDemo) return mock.addWallReply({ postId, uid, body });
+  return addDoc(collection(db, 'wallPosts', postId, 'replies'), {
+    uid, body, ts: serverTimestamp(),
+  });
+}
+
+export function watchWallReplies(postId, cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listWallReplies(postId));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'wallPosts', postId, 'replies'), orderBy('ts', 'asc'));
+  return onSnapshot(q, (snap) =>
+    cb(
+      snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        ts: d.data().ts?.toMillis?.() ?? Date.now(),
+      }))
+    )
+  );
+}
+
+// ----------------- Journal (private to user) -----------------
+
+export async function addJournalEntry({ uid, body, mood, tags }) {
+  if (isDemo) return mock.addJournalEntry({ uid, body, mood, tags });
+  return addDoc(collection(db, 'journal'), {
+    uid, body, mood: mood || null, tags: tags || [],
+    ts: serverTimestamp(),
+  });
+}
+
+export function watchJournalEntries(uid, cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listJournalEntries(uid));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'journal'), where('uid', '==', uid), orderBy('ts', 'desc'));
+  return onSnapshot(q, (snap) =>
+    cb(snap.docs.map((d) => ({ id: d.id, ...d.data(), ts: d.data().ts?.toMillis?.() ?? Date.now() })))
+  );
+}
+
+// ----------------- Crisis Safety Plan -----------------
+
+export async function saveSafetyPlan({ uid, plan }) {
+  if (isDemo) return mock.saveSafetyPlan({ uid, plan });
+  await setDoc(doc(db, 'safetyPlans', uid), { uid, ...plan, updatedAt: serverTimestamp() });
+}
+
+export async function getSafetyPlan(uid) {
+  if (isDemo) return mock.getSafetyPlan(uid);
+  const snap = await getDoc(doc(db, 'safetyPlans', uid));
+  return snap.exists() ? snap.data() : null;
+}
+
+// ----------------- Helper ratings (anonymous) -----------------
+
+export async function rateHelper({ helperUid, fromUid, chatId, stars, note }) {
+  if (isDemo) return mock.rateHelper({ helperUid, fromUid, chatId, stars, note });
+  return addDoc(collection(db, 'ratings'), {
+    helperUid, fromUid, chatId, stars, note: note || '',
+    ts: serverTimestamp(),
+  });
+}
+
+export function watchRatingsFor(helperUid, cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listRatingsFor(helperUid));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'ratings'), where('helperUid', '==', helperUid));
+  return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
 }
 
 // ----------------- Resources / Helplines -----------------
