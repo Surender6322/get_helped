@@ -275,12 +275,6 @@ label {
     gap: 8px;
   }
 
-  /* Chat: list collapses above the pane on mobile, both stack vertically */
-  .chat-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-  }
-  .chat-list { max-height: 200px; overflow-y: auto; }
 }
 
 /* Auth */
@@ -373,6 +367,28 @@ label {
   display: flex;
   gap: 8px;
   background: #fff;
+}
+
+/* Chat layout — mobile override (must come AFTER the desktop rules above
+   to win the cascade at the same specificity). */
+@media (max-width: 900px) {
+  .chat-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: auto;
+    min-height: calc(100vh - 180px);
+  }
+  .chat-list {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 180px;
+  }
+  .chat-pane {
+    min-height: 50vh;
+  }
+  .chat-msgs { padding: 12px; }
+  .chat-input { padding: 10px; }
+  .chat-input input { font-size: 16px; } /* avoid iOS auto-zoom */
 }
 
 /* Mood */
