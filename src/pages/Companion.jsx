@@ -107,7 +107,7 @@ export default function Companion() {
   };
 
   return (
-    <div>
+    <div className="page-fill">
       <div className="page-h">
         <div>
           <h1>AI Companion</h1>
@@ -124,11 +124,14 @@ export default function Companion() {
         </div>
       </div>
 
-      <div className="card mb-3" style={{ padding: 0 }}>
+      <div
+        className="card companion-shell"
+        style={{ padding: 0 }}
+      >
         <div
           ref={scrollRef}
           className="chat-msgs"
-          style={{ maxHeight: '60vh', minHeight: 360, padding: 16 }}
+          style={{ flex: 1, minHeight: 0, padding: 16 }}
         >
           {history.map((m, idx) => (
             <CompanionMessage key={idx} msg={m} />

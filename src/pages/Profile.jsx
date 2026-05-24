@@ -85,7 +85,7 @@ export default function Profile() {
         <span className="pill pill-info">{user.role}</span>
       </div>
 
-      <div className="stack" style={{ maxWidth: 640 }}>
+      <div className="grid grid-2" style={{ alignItems: 'start' }}>
         <form className="card" onSubmit={submitProfile}>
           <div className="card-h"><h3>Profile details</h3></div>
           <div className="form-row">
