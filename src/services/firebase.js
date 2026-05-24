@@ -11,6 +11,11 @@ import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getDatabase } from 'firebase/database';
+import { getFunctions } from 'firebase/functions';
+import {
+  initializeAppCheck,
+  ReCaptchaEnterpriseProvider,
+} from 'firebase/app-check';
 
 export const USE_DEMO =
   String(import.meta.env.VITE_USE_DEMO ?? 'true').toLowerCase() !== 'false';
@@ -25,10 +30,27 @@ const firebaseConfig = {
   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
 };
 
+// Cloud Functions region — must match what's configured in functions/src/*.
+// We use asia-south1 (Mumbai) because the user base is India-first.
+const FUNCTIONS_REGION = 'asia-south1';
+
+// App Check site key (reCAPTCHA Enterprise). Optional in dev — set to
+// enable App Check enforcement for hosted production.
+//
+// To enable:
+//   1. Firebase Console → App Check → Web app → reCAPTCHA Enterprise
+//   2. Create the reCAPTCHA Enterprise site key in Cloud Console
+//   3. Put the site key in .env as VITE_APP_CHECK_SITE_KEY
+//   4. Enforce App Check on each product (Firestore, RTDB, Functions, Auth)
+//
+// Without a site key, App Check is initialized in "skip" mode (no token).
+const APP_CHECK_SITE_KEY = import.meta.env.VITE_APP_CHECK_SITE_KEY || '';
+
 let app = null;
 let auth = null;
 let db = null;
 let rtdb = null;
+let functions = null;
 
 if (!USE_DEMO) {
   if (!firebaseConfig.apiKey) {
@@ -38,10 +60,28 @@ if (!USE_DEMO) {
     );
   } else {
     app = initializeApp(firebaseConfig);
+
+    // Initialize App Check first if a site key is configured. This makes
+    // any subsequent SDK calls (Firestore, RTDB, Functions) pass an App
+    // Check token, so the enforcement layer can reject calls from outside
+    // our own pages.
+    if (APP_CHECK_SITE_KEY) {
+      try {
+        initializeAppCheck(app, {
+          provider: new ReCaptchaEnterpriseProvider(APP_CHECK_SITE_KEY),
+          isTokenAutoRefreshEnabled: true,
+        });
+      } catch (e) {
+        // Non-fatal — without App Check the app still works, just less hardened.
+        console.warn('[GetHelped] App Check init failed:', e?.message || e);
+      }
+    }
+
     auth = getAuth(app);
     db = getFirestore(app);
     rtdb = getDatabase(app);
+    functions = getFunctions(app, FUNCTIONS_REGION);
   }
 }
 
-export { app, auth, db, rtdb };
+export { app, auth, db, rtdb, functions };

@@ -9,9 +9,14 @@ import {
   notificationsSupported,
   requestNotificationPermission,
   notify,
+  isNotificationsMuted,
+  setNotificationsMuted,
+  subscribeMuted,
 } from '../utils/notifications.js';
 import EmergencyButton from './EmergencyButton.jsx';
 import ToastHost from './ToastHost.jsx';
+import QuickExit from './QuickExit.jsx';
+import { useLocale, setLocale, SUPPORTED, t } from '../i18n/strings.js';
 
 export default function AppLayout() {
   const { user, logout } = useAuth();
@@ -21,7 +26,11 @@ export default function AppLayout() {
   const [chats, setChats] = useState([]);
   const [, setUnreadTick] = useState(0);
   const [permission, setPermission] = useState(getNotificationPermission());
+  const [muted, setMuted] = useState(isNotificationsMuted());
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Keep the local state in sync if mute is toggled from another tab/window.
+  useEffect(() => subscribeMuted(({ muted: m }) => setMuted(m)), []);
   const lastNotifiedRef = useRef({}); // { chatId: lastMessageTs }
 
   // Auto-close the mobile drawer on every route change.
@@ -83,17 +92,37 @@ export default function AppLayout() {
   const askPermission = async () => {
     const r = await requestNotificationPermission();
     setPermission(r);
+    if (r === 'granted') setNotificationsMuted(false);
+  };
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    setNotificationsMuted(next);
   };
 
   const showPermissionPrompt =
     notificationsSupported() &&
     permission === 'default' &&
+    !muted &&
     chats.length > 0;
+
+  const notifStatus = !notificationsSupported()
+    ? 'unsupported'
+    : permission === 'denied'
+      ? 'blocked'
+      : muted
+        ? 'muted'
+        : permission === 'granted'
+          ? 'on'
+          : 'ask';
 
   const unread = countUnreadChats(user.uid, chats);
 
+  const { locale } = useLocale();
   const links = navLinksFor(user.role).map((l) => ({
     ...l,
+    label: l.i18nKey ? t(locale, l.i18nKey, l.label) : l.label,
     badge: l.unreadEligible ? unread : 0,
   }));
 
@@ -177,6 +206,10 @@ export default function AppLayout() {
           >
             {theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}
           </button>
+
+          <LangSwitcher />
+
+          <NotifControl status={notifStatus} onAsk={askPermission} onToggle={toggleMute} />
           {isDemo && (
             <div style={{ marginTop: 12, fontSize: 11 }}>
               <span className="pill pill-warn">DEMO MODE</span>
@@ -199,6 +232,7 @@ export default function AppLayout() {
         <Outlet />
       </main>
       <ToastHost />
+      <QuickExit />
     </div>
   );
 }
@@ -206,31 +240,77 @@ export default function AppLayout() {
 function navLinksFor(role) {
   if (role === 'user') {
     return [
-      { to: '/app', label: 'Dashboard', end: true },
-      { to: '/app/helpers', label: 'Find a Helper' },
-      { to: '/app/chat', label: 'My Chats', unreadEligible: true },
-      { to: '/app/companion', label: 'AI Companion' },
-      { to: '/app/wall', label: 'Wall of Support' },
-      { to: '/app/journal', label: 'Journal' },
-      { to: '/app/mood', label: 'Mood Tracker' },
-      { to: '/app/safety-plan', label: 'Safety Plan' },
-      { to: '/app/resources', label: 'Resources' },
-      { to: '/app/profile', label: 'Profile' },
+      { to: '/app', label: 'Dashboard', i18nKey: 'nav.dashboard', end: true },
+      { to: '/app/helpers', label: 'Find a Helper', i18nKey: 'nav.helpers' },
+      { to: '/app/chat', label: 'My Chats', i18nKey: 'nav.chats', unreadEligible: true },
+      { to: '/app/companion', label: 'AI Companion', i18nKey: 'nav.companion' },
+      { to: '/app/wall', label: 'Wall of Support', i18nKey: 'nav.wall' },
+      { to: '/app/journal', label: 'Journal', i18nKey: 'nav.journal' },
+      { to: '/app/mood', label: 'Mood Tracker', i18nKey: 'nav.mood' },
+      { to: '/app/safety-plan', label: 'Safety Plan', i18nKey: 'nav.safety' },
+      { to: '/app/library', label: 'Library', i18nKey: 'nav.library' },
+      { to: '/app/profile', label: 'Profile', i18nKey: 'nav.profile' },
     ];
   }
   if (role === 'helper') {
     return [
-      { to: '/helper', label: 'Dashboard', end: true },
-      { to: '/helper/chat', label: 'Active Chats', unreadEligible: true },
-      { to: '/helper/wall', label: 'Wall of Support' },
-      { to: '/helper/resources', label: 'Resources' },
-      { to: '/helper/profile', label: 'Profile' },
+      { to: '/helper', label: 'Dashboard', i18nKey: 'nav.dashboard', end: true },
+      { to: '/helper/chat', label: 'Active Chats', i18nKey: 'nav.chats', unreadEligible: true },
+      { to: '/helper/wall', label: 'Wall of Support', i18nKey: 'nav.wall' },
+      { to: '/helper/supervision', label: 'Helper Space' },
+      { to: '/helper/library', label: 'Library', i18nKey: 'nav.library' },
+      { to: '/helper/profile', label: 'Profile', i18nKey: 'nav.profile' },
     ];
   }
   return [
     { to: '/admin', label: 'Admin', end: true },
-    { to: '/admin/profile', label: 'Profile' },
+    { to: '/admin/supervision', label: 'Helper Space' },
+    { to: '/admin/library', label: 'Library', i18nKey: 'nav.library' },
+    { to: '/admin/profile', label: 'Profile', i18nKey: 'nav.profile' },
   ];
+}
+
+function NotifControl({ status, onAsk, onToggle }) {
+  if (status === 'unsupported') return null;
+  if (status === 'blocked') {
+    return (
+      <button
+        type="button"
+        className="theme-toggle"
+        title="Notifications were blocked. Re-enable from your browser's site settings."
+        disabled
+      >
+        🔕 Notifications blocked
+      </button>
+    );
+  }
+  if (status === 'ask') {
+    return (
+      <button
+        type="button"
+        className="theme-toggle"
+        onClick={onAsk}
+        title="Allow notifications so you don't miss a message"
+      >
+        🔔 Enable notifications
+      </button>
+    );
+  }
+  // status is 'on' or 'muted' — both are toggle-able.
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      onClick={onToggle}
+      title={
+        status === 'muted'
+          ? 'Notifications are muted. Click to turn back on.'
+          : 'Notifications are on. Click to mute.'
+      }
+    >
+      {status === 'muted' ? '🔕 Notifications muted' : '🔔 Notifications on'}
+    </button>
+  );
 }
 
 function Logo() {
@@ -254,5 +334,28 @@ function Logo() {
         fill="#fff"
       />
     </svg>
+  );
+}
+
+// A tiny inline language switcher pinned to the sidebar footer. We keep
+// the surface this small on purpose — the i18n catalog only covers ~20
+// strings today, so a full settings page would be overkill.
+function LangSwitcher() {
+  const { locale } = useLocale();
+  return (
+    <div className="lang-switch" role="group" aria-label="Language">
+      {SUPPORTED.map((s) => (
+        <button
+          key={s.code}
+          type="button"
+          className={`btn btn-sm ${locale === s.code ? 'btn-primary' : 'btn-ghost'}`}
+          onClick={() => setLocale(s.code)}
+          aria-pressed={locale === s.code}
+          lang={s.code}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
   );
 }

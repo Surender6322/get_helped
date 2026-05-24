@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { addJournalEntry, watchJournalEntries } from '../services/api.js';
+import {
+  isEncryptionConfigured,
+  isEncryptionUnlocked,
+  enableEncryption,
+  unlockEncryption,
+  lockEncryption,
+  encryptString,
+  decryptString,
+  looksEncrypted,
+  resetEncryption,
+} from '../utils/clientCrypto.js';
 
 const MOODS = [
   { key: 'great', emoji: '😄', label: 'Great' },
@@ -24,6 +35,8 @@ export default function Journal() {
   const [busy, setBusy] = useState(false);
   const [entries, setEntries] = useState([]);
   const [filter, setFilter] = useState(''); // tag filter
+  const [e2eOn, setE2eOn] = useState(isEncryptionConfigured());
+  const [e2eUnlocked, setE2eUnlocked] = useState(isEncryptionUnlocked());
 
   useEffect(() => watchJournalEntries(user.uid, setEntries), [user.uid]);
 
@@ -44,7 +57,19 @@ export default function Journal() {
     if (!t) return;
     setBusy(true);
     try {
-      await addJournalEntry({ uid: user.uid, body: t, mood, tags });
+      // Optional client-side encryption: if the user has set up a
+      // passphrase AND has it unlocked, encrypt the body before send.
+      // Otherwise write plaintext like before.
+      let payload = t;
+      if (e2eOn && e2eUnlocked) {
+        try {
+          payload = await encryptString(t);
+        } catch (err) {
+          alert("Couldn't encrypt: " + (err?.message || err));
+          return;
+        }
+      }
+      await addJournalEntry({ uid: user.uid, body: payload, mood, tags });
       setBody('');
       setTags([]);
       setTagInput('');
@@ -67,7 +92,15 @@ export default function Journal() {
           <h1>Journal</h1>
           <p>A private space — only you can read these entries.</p>
         </div>
-        <span className="pill pill-info">{entries.length} entries</span>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <span className="pill pill-info">{entries.length} entries</span>
+          <E2EControls
+            on={e2eOn}
+            unlocked={e2eUnlocked}
+            setOn={setE2eOn}
+            setUnlocked={setE2eUnlocked}
+          />
+        </div>
       </div>
 
       <div className="grid grid-2">
@@ -175,16 +208,42 @@ export default function Journal() {
 
 function JournalCard({ entry }) {
   const m = MOODS.find((x) => x.key === entry.mood);
+  const [body, setBody] = useState(() =>
+    looksEncrypted(entry.body) ? null : String(entry.body || ''),
+  );
+  const [decryptErr, setDecryptErr] = useState('');
+
+  useEffect(() => {
+    if (!looksEncrypted(entry.body)) return;
+    (async () => {
+      try {
+        const plain = await decryptString(entry.body);
+        setBody(plain);
+      } catch (err) {
+        setDecryptErr(err?.message || 'Locked');
+      }
+    })();
+  }, [entry.body]);
+
   return (
     <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 10 }}>
       <div className="row between mb-2">
         <span style={{ fontSize: 14 }}>
           {m && <span style={{ marginRight: 6 }}>{m.emoji}</span>}
           <strong>{m?.label || ''}</strong>
+          {looksEncrypted(entry.body) && (
+            <span className="pill pill-info" style={{ marginLeft: 6, fontSize: 11 }}>🔒 encrypted</span>
+          )}
         </span>
         <span className="muted" style={{ fontSize: 12 }}>{new Date(entry.ts).toLocaleString()}</span>
       </div>
-      <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.5 }}>{entry.body}</div>
+      {body !== null ? (
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.5 }}>{body}</div>
+      ) : (
+        <div className="muted" style={{ fontSize: 13, fontStyle: 'italic' }}>
+          {decryptErr ? `🔒 ${decryptErr}` : 'Decrypting…'}
+        </div>
+      )}
       {entry.tags?.length > 0 && (
         <div className="mood-row mt-2" style={{ gap: 4 }}>
           {entry.tags.map((t) => (
@@ -192,6 +251,135 @@ function JournalCard({ entry }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function E2EControls({ on, unlocked, setOn, setUnlocked }) {
+  const [open, setOpen] = useState(false);
+  const [pass, setPass] = useState('');
+  const [pass2, setPass2] = useState('');
+  const [err, setErr] = useState('');
+
+  const enable = async (e) => {
+    e.preventDefault();
+    setErr('');
+    if (pass !== pass2) return setErr('Passphrases do not match.');
+    try {
+      await enableEncryption(pass);
+      setOn(true);
+      setUnlocked(true);
+      setOpen(false);
+      setPass('');
+      setPass2('');
+    } catch (e2) {
+      setErr(e2?.message || 'Failed to enable.');
+    }
+  };
+
+  const unlock = async (e) => {
+    e.preventDefault();
+    setErr('');
+    try {
+      await unlockEncryption(pass);
+      setUnlocked(true);
+      setOpen(false);
+      setPass('');
+    } catch (e2) {
+      setErr(e2?.message || 'Wrong passphrase.');
+    }
+  };
+
+  if (!on) {
+    return (
+      <>
+        <button className="btn btn-ghost btn-sm" onClick={() => setOpen(true)} title="Encrypt new journal entries on this device">
+          🔒 Set passphrase
+        </button>
+        {open && (
+          <Modal title="Encrypt your journal" onClose={() => setOpen(false)}>
+            <p style={{ fontSize: 13 }}>
+              Pick a passphrase. New entries you write will be encrypted in
+              your browser before they're saved — even Firebase admins can't
+              read them. <strong>If you forget this passphrase, those entries
+              are gone forever.</strong> No reset, no recovery.
+            </p>
+            <form onSubmit={enable} className="stack-sm">
+              <input
+                type="password"
+                placeholder="Passphrase (min 6 chars)"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                autoFocus
+                minLength={6}
+              />
+              <input
+                type="password"
+                placeholder="Confirm passphrase"
+                value={pass2}
+                onChange={(e) => setPass2(e.target.value)}
+                minLength={6}
+              />
+              {err && <div className="pill pill-danger">{err}</div>}
+              <button className="btn btn-primary" disabled={pass.length < 6 || pass !== pass2}>
+                Enable encryption
+              </button>
+            </form>
+          </Modal>
+        )}
+      </>
+    );
+  }
+
+  if (!unlocked) {
+    return (
+      <>
+        <button className="btn btn-ghost btn-sm" onClick={() => setOpen(true)}>
+          🔒 Unlock
+        </button>
+        {open && (
+          <Modal title="Unlock journal" onClose={() => setOpen(false)}>
+            <form onSubmit={unlock} className="stack-sm">
+              <input
+                type="password"
+                placeholder="Your passphrase"
+                value={pass}
+                onChange={(e) => setPass(e.target.value)}
+                autoFocus
+              />
+              {err && <div className="pill pill-danger">{err}</div>}
+              <button className="btn btn-primary">Unlock</button>
+            </form>
+          </Modal>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <button
+      className="btn btn-ghost btn-sm"
+      onClick={() => {
+        lockEncryption();
+        setUnlocked(false);
+      }}
+      title="Lock encryption (your passphrase will be cleared from this tab)"
+    >
+      🔓 Lock
+    </button>
+  );
+}
+
+function Modal({ title, children, onClose }) {
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+        <div className="row between mb-3">
+          <h3 style={{ margin: 0 }}>{title}</h3>
+          <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }

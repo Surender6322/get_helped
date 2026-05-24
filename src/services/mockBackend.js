@@ -68,9 +68,12 @@ const seed = () => ({
   },
   wallPosts: [],
   wallReplies: {}, // { postId: [reply,...] }
+  helperWall: [],
+  companionMemory: {}, // { uid: [items] }
   journal: [],
   safetyPlans: {}, // { uid: plan }
   ratings: [],
+  library: [],
   resources: [
     {
       id: 'r1',
@@ -115,11 +118,45 @@ const seed = () => ({
   ],
 });
 
+// Verified May 2026. iCall hours corrected (was 8am-10pm; actual is 10am-8pm
+// per icallhelpline.org). Tele-MANAS added — Govt of India / NIMHANS 24×7
+// helpline in 20 languages, the gold standard for Indian users.
+// Order matters: 24×7 + multi-language lines first so that a user in distress
+// at 3am sees an option that's actually open and in their language.
 const helplines = [
-  { name: 'iCall (India)', tel: '+91 9152987821', hours: 'Mon–Sat, 8am–10pm' },
-  { name: 'Vandrevala Foundation (24x7)', tel: '+91 1860-2662-345' },
-  { name: 'AASRA (24x7)', tel: '+91 9820466726' },
-  { name: 'Emergency Services (India)', tel: '112' },
+  {
+    name: 'Tele-MANAS (Govt of India · 24×7)',
+    tel: '14416',
+    alt: '1800-891-4416',
+    hours: '24×7',
+    langs: 'EN/HI/TA/TE/KN/BN/MR/GU/ML/OR/PA/AS + more',
+  },
+  {
+    name: 'Vandrevala Foundation (24×7)',
+    tel: '+91 1860-2662-345',
+    hours: '24×7',
+    langs: 'EN/HI',
+  },
+  {
+    name: 'AASRA (24×7)',
+    tel: '+91 9820466726',
+    hours: '24×7',
+    langs: 'EN/HI',
+  },
+  {
+    name: 'KIRAN (Govt of India · 24×7)',
+    tel: '1800-599-0019',
+    hours: '24×7',
+    langs: 'EN/HI + 11 regional',
+  },
+  {
+    name: 'iCall (TISS)',
+    tel: '+91 9152987821',
+    alt: '022-25521111',
+    hours: 'Mon–Sat 10am–8pm',
+    langs: 'EN/HI/MR',
+  },
+  { name: 'Emergency Services (India)', tel: '112', hours: '24×7' },
 ];
 
 function load() {
@@ -261,8 +298,16 @@ async function setHelperVerification(helperUid, verified) {
   return updateProfile(helperUid, { verified });
 }
 
+async function setHelperVerificationStatus(helperUid, status, extra = {}) {
+  const patch = { verificationStatus: status, ...extra };
+  if (status === 'verified') patch.verified = true;
+  else patch.verified = false;
+  if (status === 'rejected' || status === 'revoked') patch.available = false;
+  return updateProfile(helperUid, patch);
+}
+
 async function setHelperAvailability(helperUid, available) {
-  return updateProfile(helperUid, { available });
+  return updateProfile(helperUid, { available, lastAvailableAt: Date.now() });
 }
 
 function findUserByEmail(email) {
@@ -274,6 +319,12 @@ function findUserByEmail(email) {
 function listAdmins() {
   return load()
     .users.filter((u) => u.role === 'admin')
+    .map(sanitize);
+}
+
+function listAllUsers() {
+  return load()
+    .users.filter((u) => u.role === 'user')
     .map(sanitize);
 }
 
@@ -299,7 +350,22 @@ async function changePassword({ currentPassword, newPassword }) {
 
 async function addMood({ uid: userUid, mood, note }) {
   const state = load();
-  state.moods.push({ uid: userUid, mood, note: note || '', ts: Date.now() });
+  state.moods.push({
+    id: genId('mood'),
+    uid: userUid,
+    mood,
+    note: note || '',
+    ts: Date.now(),
+  });
+  save(state);
+}
+
+async function updateMood(id, { mood, note }) {
+  const state = load();
+  const m = state.moods.find((x) => x.id === id);
+  if (!m) return;
+  m.mood = mood;
+  m.note = note || '';
   save(state);
 }
 
@@ -307,6 +373,7 @@ function listMoods(userUid) {
   const state = load();
   return state.moods
     .filter((m) => m.uid === userUid)
+    .map((m) => ({ id: m.id, ...m }))
     .sort((a, b) => b.ts - a.ts);
 }
 
@@ -492,6 +559,80 @@ function listRatingsFor(helperUid) {
   return (load().ratings || []).filter((r) => r.helperUid === helperUid);
 }
 
+// --- Library (helper-authored articles & exercises) ---
+
+function listLibrary({ status, authorUid } = {}) {
+  const state = load();
+  let rows = [...(state.library || [])];
+  if (status) rows = rows.filter((p) => p.status === status);
+  if (authorUid) rows = rows.filter((p) => p.authorUid === authorUid);
+  rows.sort((a, b) => (b.approvedAt ?? b.createdAt ?? 0) - (a.approvedAt ?? a.createdAt ?? 0));
+  return rows;
+}
+
+async function createLibraryPost({ authorUid, authorName, kind, title, body }) {
+  const state = load();
+  if (!state.library) state.library = [];
+  const post = {
+    id: genId('lib'),
+    authorUid,
+    authorName: authorName || 'Helper',
+    kind,
+    title,
+    body,
+    status: 'submitted',
+    createdAt: Date.now(),
+    approvedAt: null,
+    approvedBy: null,
+    likes: 0,
+    likeUids: [],
+  };
+  state.library.push(post);
+  save(state);
+  return post.id;
+}
+
+async function updateLibraryPost(id, fields) {
+  const state = load();
+  const p = (state.library || []).find((x) => x.id === id);
+  if (!p) return;
+  Object.assign(p, fields);
+  save(state);
+}
+
+async function deleteLibraryPost(id) {
+  const state = load();
+  state.library = (state.library || []).filter((x) => x.id !== id);
+  save(state);
+}
+
+async function approveLibraryPost(id, adminUid) {
+  return updateLibraryPost(id, {
+    status: 'approved',
+    approvedAt: Date.now(),
+    approvedBy: adminUid,
+  });
+}
+
+async function rejectLibraryPost(id) {
+  return updateLibraryPost(id, { status: 'rejected' });
+}
+
+async function toggleLibraryLike(id, uid, currentlyLiked) {
+  const state = load();
+  const p = (state.library || []).find((x) => x.id === id);
+  if (!p) return;
+  if (!Array.isArray(p.likeUids)) p.likeUids = [];
+  if (currentlyLiked) {
+    p.likeUids = p.likeUids.filter((u) => u !== uid);
+    p.likes = Math.max(0, (p.likes || 0) - 1);
+  } else {
+    if (!p.likeUids.includes(uid)) p.likeUids.push(uid);
+    p.likes = (p.likes || 0) + 1;
+  }
+  save(state);
+}
+
 // --- Resources ---
 
 function listResources() {
@@ -510,6 +651,37 @@ function getUser(uidStr) {
   return u ? sanitize(u) : null;
 }
 
+function watchUser(uidStr, cb) {
+  const emit = () => cb(getUser(uidStr));
+  emit();
+  return subscribe(emit);
+}
+
+// ----- helper supervision wall -----
+function createHelperWallPost({ uid, displayName, body, kind }) {
+  const state = load();
+  const post = {
+    id: 'hw_' + Math.random().toString(36).slice(2, 9),
+    uid,
+    displayName: displayName || 'A helper',
+    body: String(body || '').slice(0, 1500),
+    kind: kind || 'reflection',
+    ts: Date.now(),
+  };
+  state.helperWall = state.helperWall || [];
+  state.helperWall.unshift(post);
+  save(state);
+  return post;
+}
+function listHelperWallPosts() {
+  return [...(load().helperWall || [])].sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+function deleteHelperWallPost(id) {
+  const state = load();
+  state.helperWall = (state.helperWall || []).filter((p) => p.id !== id);
+  save(state);
+}
+
 export const mock = {
   subscribe,
   // auth
@@ -522,13 +694,16 @@ export const mock = {
   listHelpers,
   listAllHelpers,
   listAdmins,
+  listAllUsers,
   setHelperVerification,
+  setHelperVerificationStatus,
   setHelperAvailability,
   findUserByEmail,
   setUserRole,
   changePassword,
   // mood
   addMood,
+  updateMood,
   listMoods,
   // chat
   startOrGetChat,
@@ -537,6 +712,14 @@ export const mock = {
   sendMessage,
   setTyping,
   listTypingExcept,
+  // library
+  listLibrary,
+  createLibraryPost,
+  updateLibraryPost,
+  deleteLibraryPost,
+  approveLibraryPost,
+  rejectLibraryPost,
+  toggleLibraryLike,
   // wall / journal / safety / ratings
   createWallPost,
   listWallPosts,
@@ -549,8 +732,13 @@ export const mock = {
   getSafetyPlan,
   rateHelper,
   listRatingsFor,
+  // helper supervision
+  createHelperWallPost,
+  listHelperWallPosts,
+  deleteHelperWallPost,
   // resources / lookups
   listResources,
   getHelplines,
   getUser,
+  watchUser,
 };

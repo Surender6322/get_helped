@@ -1,0 +1,17 @@
+{
+  "name": "gethelped-functions",
+  "description": "Server-side functions for GetHelped: Gemini proxy, ratings privacy, companion memory, helper supervision.",
+  "engines": { "node": "20" },
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.1.0"
+  },
+  "private": true
+}

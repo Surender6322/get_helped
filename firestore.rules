@@ -1,6 +1,22 @@
 rules_version = '2';
 
 // Firestore security rules for GetHelped.
+//
+// Phase 2 hardening highlights:
+//   • users/{uid}     — read = self or admin only (PII protected)
+//   • usersPublic/{uid} — read = any signed-in user (display-only projection;
+//                          contains displayName, role, presence, tags — never email)
+//   • ratings/{...}   — write only via Cloud Function (callable submitRating)
+//                       which strips fromUid into a separate public projection.
+//                       Direct-write from clients is denied so the helper can
+//                       never read who rated them.
+//   • usersPublic/{helperUid}/ratings/{...} — anonymized public mirror, readable
+//   • companionMemory/{uid}/items/{...}     — owner-only, opt-in
+//   • helperWall/{...}                       — helpers + admins only
+//
+// Anything that involves identity-stripping (ratings, etc) is enforced by
+// requiring the call to come through Cloud Functions, since rules can't
+// project columns away. Direct-from-client `addDoc` is blocked.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -17,14 +33,32 @@ service cloud.firestore {
     function isAdmin() {
       return isSignedIn() && userDoc(request.auth.uid).role == 'admin';
     }
+    function isVerifiedHelper() {
+      return isSignedIn()
+        && userDoc(request.auth.uid).role == 'helper'
+        && userDoc(request.auth.uid).verified == true;
+    }
 
-    // -------- users --------
+    // -------- users (transitional: signed-in read until usersPublic backfill is complete) --------
+    //
+    // PHASE 2 ROLLOUT NOTE: the long-term shape of this rule is
+    //   read = isSelf(uid) || isAdmin()
+    // with all cross-user reads going through usersPublic. We're
+    // keeping the read open to any signed-in user FOR NOW so existing
+    // clients (which still read users/{uid} directly for partner names
+    // etc.) don't break during the rollout. After:
+    //   1. Cloud Functions are deployed (Blaze plan needed)
+    //   2. backfillUsersPublic has populated /usersPublic
+    //   3. New client bundle is rolled out everywhere
+    // come back here and tighten this rule to:
+    //   allow read: if isSelf(uid) || isAdmin();
+    //
+    // Tracking: see TODO p2-rules-tighten in repo.
     match /users/{uid} {
-      allow read: if isSignedIn();
+      allow read:   if isSignedIn();
       allow create: if isSelf(uid)
         && request.resource.data.role in ['user', 'helper']
         && request.resource.data.uid == uid;
-      // Self-update of profile fields, but never role/verified.
       allow update: if (isSelf(uid)
                         && !('role' in request.resource.data.diff(resource.data).affectedKeys())
                         && !('verified' in request.resource.data.diff(resource.data).affectedKeys()))
@@ -32,12 +66,25 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // -------- usersPublic (read-only display projection) --------
+    // Mirrored from /users by the onUserWrite trigger. Contains only
+    // PUBLIC_FIELDS (displayName, role, verified, available, helperStatus,
+    // lastAvailableAt, tags, bio). Never email/credentials.
+    match /usersPublic/{uid} {
+      allow read: if isSignedIn();
+      // All writes happen via the onUserWrite trigger or admin SDK.
+      // Direct client writes are denied.
+      allow write: if false;
+
+      // Public per-helper rating mirror — Cloud Function writes only.
+      match /ratings/{ratingId} {
+        allow read: if isSignedIn();
+        allow write: if false;
+      }
+    }
+
     // -------- chats --------
     match /chats/{chatId} {
-      // Allow read on a non-existent doc (resource == null) so the
-      // deterministic-id lookup in startOrGetChat() can probe before
-      // creating. Listing/querying still requires the doc to exist
-      // and the participant predicate to hold.
       allow read: if isSignedIn()
         && (resource == null
             || request.auth.uid == resource.data.userUid
@@ -48,15 +95,39 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && request.resource.data.userUid == request.auth.uid;
       allow delete: if isAdmin();
+
+      // ---- chats/{chatId}/messages (Phase 2 J: Firestore-native messages) ----
+      // Either participant in the parent chat can read/write.
+      match /messages/{messageId} {
+        function chatDoc() {
+          return get(/databases/$(database)/documents/chats/$(chatId)).data;
+        }
+        function isParticipant() {
+          return isSignedIn()
+            && (request.auth.uid == chatDoc().userUid
+                || request.auth.uid == chatDoc().helperUid);
+        }
+        allow read: if isParticipant();
+        allow create: if isParticipant()
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 4000;
+        allow update, delete: if false; // immutable; users redact via UI flag instead
+      }
     }
 
     // -------- moods (private) --------
     match /moods/{moodId} {
       allow read, delete: if isSignedIn() && request.auth.uid == resource.data.uid;
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow update: if isSignedIn()
+        && request.auth.uid == resource.data.uid
+        && !('uid' in request.resource.data.diff(resource.data).affectedKeys())
+        && !('ts'  in request.resource.data.diff(resource.data).affectedKeys());
     }
 
-    // -------- journal (private) --------
+    // -------- journal (private; payload may be E2E-encrypted by client) --------
     match /journal/{entryId} {
       allow read, delete, update: if isSignedIn() && request.auth.uid == resource.data.uid;
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
@@ -68,9 +139,6 @@ service cloud.firestore {
     }
 
     // -------- wall posts (community feed) --------
-    // Anyone signed in can read. Authors can create their own; only the
-    // author or an admin can edit / delete. Heart toggle is allowed for
-    // any signed-in user (we limit it to the heartUids/hearts fields).
     match /wallPosts/{postId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
@@ -79,10 +147,8 @@ service cloud.firestore {
         && request.resource.data.body.size() <= 1000;
       allow update: if isSignedIn()
                     && (
-                      // Author can edit own post fields except hearts/heartUids
                       (request.auth.uid == resource.data.uid
                         && !('uid' in request.resource.data.diff(resource.data).affectedKeys()))
-                      // Anyone can toggle heart fields only
                       || request.resource.data.diff(resource.data).affectedKeys()
                           .hasOnly(['hearts','heartUids'])
                       || isAdmin()
@@ -99,21 +165,81 @@ service cloud.firestore {
       }
     }
 
-    // -------- helper ratings (anonymous to helper, only admin can read in aggregate) --------
+    // -------- helper-only supervision wall --------
+    // Helpers post about tough sessions / wins / questions; only verified
+    // helpers and admins can read. Admins moderate.
+    match /helperWall/{postId} {
+      allow read: if isVerifiedHelper() || isAdmin();
+      allow create: if isVerifiedHelper()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 1500;
+      allow update: if (isSignedIn() && request.auth.uid == resource.data.uid
+                        && (isVerifiedHelper() || isAdmin())
+                        && !('uid' in request.resource.data.diff(resource.data).affectedKeys()))
+                    || isAdmin();
+      allow delete: if isAdmin()
+                    || (isSignedIn() && request.auth.uid == resource.data.uid);
+    }
+
+    // -------- helper ratings (raw with fromUid) --------
+    // Direct client writes are DENIED — must go through submitRating
+    // Cloud Function which writes both the private + public docs.
+    // Only admins read (for abuse review).
     match /ratings/{ratingId} {
-      // Helpers can read their own ratings (without seeing fromUid? — for simplicity we let them see all fields).
-      allow read: if isSignedIn() && (request.auth.uid == resource.data.helperUid || isAdmin());
-      allow create: if isSignedIn()
-        && request.resource.data.fromUid == request.auth.uid
-        && request.resource.data.stars is int
-        && request.resource.data.stars >= 1
-        && request.resource.data.stars <= 5;
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // -------- companion memory (private to user, opt-in) --------
+    match /companionMemory/{uid} {
+      allow read, write: if isSelf(uid);
+      match /items/{itemId} {
+        allow read, write: if isSelf(uid);
+      }
     }
 
     // -------- resources --------
     match /resources/{id} {
       allow read: if true;
       allow write: if isAdmin();
+    }
+
+    // -------- library (helper-authored articles & exercises) --------
+    match /library/{id} {
+      allow read: if isSignedIn() && (
+        resource.data.status == 'approved'
+        || request.auth.uid == resource.data.authorUid
+        || isAdmin()
+      );
+      allow create: if isSignedIn()
+        && userDoc(request.auth.uid).role == 'helper'
+        && userDoc(request.auth.uid).verified == true
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.status == 'submitted'
+        && request.resource.data.kind in ['article', 'exercise']
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 200
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 10000;
+      allow update: if isSignedIn() && (
+        isAdmin()
+        || (
+          request.auth.uid == resource.data.authorUid
+          && resource.data.status != 'approved'
+          && !('status' in request.resource.data.diff(resource.data).affectedKeys())
+          && !('authorUid' in request.resource.data.diff(resource.data).affectedKeys())
+          && !('likes' in request.resource.data.diff(resource.data).affectedKeys())
+          && !('likeUids' in request.resource.data.diff(resource.data).affectedKeys())
+        )
+        || (
+          resource.data.status == 'approved'
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['likes', 'likeUids'])
+        )
+      );
+      allow delete: if isSignedIn()
+        && (request.auth.uid == resource.data.authorUid || isAdmin());
     }
   }
 }

@@ -24,16 +24,7 @@ export default function Landing() {
           </div>
 
           {isDemo && (
-            <div
-              className="mt-4"
-              style={{
-                background: '#fff',
-                border: '1px solid var(--border)',
-                borderRadius: 12,
-                padding: 14,
-                fontSize: 13,
-              }}
-            >
+            <div className="card mt-4" style={{ padding: 14, fontSize: 13 }}>
               <strong>Demo mode is on.</strong> Try these accounts:
               <ul style={{ margin: '8px 0 0 18px', padding: 0 }}>
                 <li><code>riya@gethelped.app</code> / <code>user123</code> (User)</li>
@@ -54,7 +45,7 @@ export default function Landing() {
           </p>
           <Link to="/register" className="btn btn-primary btn-block">Create your free account</Link>
           <Link to="/login" className="btn btn-ghost btn-block" style={{ marginTop: 10 }}>Sign in</Link>
-          <p className="switch">Confidential · Free for users · Built with React + Firebase</p>
+          <p className="switch">Confidential · Free to use · Anonymous if you want to be</p>
         </div>
       </section>
     </div>
