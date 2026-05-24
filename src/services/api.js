@@ -222,7 +222,18 @@ export async function startOrGetChat({ userUid, helperUid, anonymous }) {
   } else if (anonymous !== undefined && snap.data().anonymous !== anonymous) {
     await updateDoc(ref, { anonymous: !!anonymous });
   }
-  return (await getDoc(ref)).data();
+  return normalizeChat((await getDoc(ref)).data());
+}
+
+// Normalize Firestore Timestamps in a chat doc into JS millis so the UI
+// can pass them straight to `new Date(...)` without Invalid Date results.
+function normalizeChat(data) {
+  if (!data) return data;
+  return {
+    ...data,
+    createdAt: data.createdAt?.toMillis?.() ?? data.createdAt ?? null,
+    lastTs: data.lastTs?.toMillis?.() ?? data.lastTs ?? null,
+  };
 }
 
 export function watchChatsFor(uid, cb) {
@@ -236,13 +247,11 @@ export function watchChatsFor(uid, cb) {
   const q2 = query(collection(db, 'chats'), where('helperUid', '==', uid));
   let aRows = [], bRows = [];
   const emit = () => {
-    const merged = [...aRows, ...bRows].sort(
-      (a, b) => (b.lastTs?.toMillis?.() ?? 0) - (a.lastTs?.toMillis?.() ?? 0)
-    );
+    const merged = [...aRows, ...bRows].sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
     cb(merged);
   };
-  const u1 = onSnapshot(q1, (s) => { aRows = s.docs.map((d) => d.data()); emit(); });
-  const u2 = onSnapshot(q2, (s) => { bRows = s.docs.map((d) => d.data()); emit(); });
+  const u1 = onSnapshot(q1, (s) => { aRows = s.docs.map((d) => normalizeChat(d.data())); emit(); });
+  const u2 = onSnapshot(q2, (s) => { bRows = s.docs.map((d) => normalizeChat(d.data())); emit(); });
   return () => { u1(); u2(); };
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useTheme } from '../context/ThemeContext.jsx';
@@ -234,15 +234,21 @@ function navLinksFor(role) {
 }
 
 function Logo() {
+  // Logo renders twice on the same page (mobile topbar + sidebar). Without a
+  // unique gradient id per instance, the duplicate <defs id="lg"> can fail
+  // to resolve in some browsers and the heart's blue background disappears,
+  // leaving a white-on-white "invisible" icon in light mode.
+  const reactId = useId();
+  const gradId = `gh-logo-grad-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
   return (
-    <svg width="22" height="22" viewBox="0 0 64 64">
+    <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true">
       <defs>
-        <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+        <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0%" stopColor="#7BA7E1" />
           <stop offset="100%" stopColor="#5B7FDE" />
         </linearGradient>
       </defs>
-      <rect width="64" height="64" rx="14" fill="url(#lg)" />
+      <rect width="64" height="64" rx="14" fill={`url(#${gradId})`} />
       <path
         d="M32 48s-14-8.5-14-19a8 8 0 0114-5.3A8 8 0 0146 29c0 10.5-14 19-14 19z"
         fill="#fff"
