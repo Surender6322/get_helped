@@ -6,23 +6,34 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { chatWithCompanion, isCompanionConfigured } from '../services/gemini.js';
 import { detectCrisisSignals } from '../utils/crisisDetection.js';
-import { getHelplines } from '../services/api.js';
+import {
+  getHelplines,
+  saveCompanionMemoryItem,
+  wipeCompanionMemory,
+  watchCompanionMemory,
+  updateProfile,
+  getUser,
+} from '../services/api.js';
+import { CrisisModal } from '../components/EmergencyButton.jsx';
+import { useEscapeKey } from '../hooks/useEscapeKey.js';
 
 const KEY_PREFIX = 'gethelped_companion_';
 const MAX_HISTORY = 30; // last N messages used for context
 
 const SUGGESTIONS = [
   "I've had a rough day, can we just talk?",
-  "I keep overthinking everything. Help me untangle this.",
+  "Aaj bahut overthinking ho rahi hai, help kar do.",
   "Help me wind down before bed.",
-  "I'm anxious about an exam tomorrow.",
+  "Kal exam hai, anxiety ho rahi hai.",
 ];
 
 const GREETING = {
   role: 'assistant',
   text:
-    "Hi, I'm here. This is a private space — anything you say stays between us. " +
-    "What's on your mind right now?",
+    "Hey, I'm here. ☺️ This is your safe space — whatever you share stays just between us.\n\n" +
+    "Talk to me in whichever language feels easiest — English, हिंदी, Hinglish, mix-and-match — koi problem nahi. " +
+    "I'll meet you where you are.\n\n" +
+    "So… what's on your mind right now?",
 };
 
 function loadHistory(uid) {
@@ -48,6 +59,8 @@ export default function Companion() {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [showCrisis, setShowCrisis] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
   const scrollRef = useRef(null);
 
   useEffect(() => saveHistory(user.uid, history), [user.uid, history]);
@@ -67,6 +80,13 @@ export default function Companion() {
     if (!t || busy) return;
     setError('');
 
+    // Local crisis classifier — independent of the LLM. If it fires
+    // high we surface the helpline panel immediately, regardless of
+    // what the model returns. (Per JMIR 2026 / Headspace Ebb pattern:
+    // safety detection runs as a separate pipeline.)
+    const localClass = detectCrisisSignals(t);
+    if (localClass.severity === 'high') setShowCrisis(true);
+
     const userMsg = { role: 'user', text: t, ts: Date.now() };
     const next = [...history, userMsg];
     setHistory(next);
@@ -75,13 +95,40 @@ export default function Companion() {
 
     try {
       const recent = next.slice(-MAX_HISTORY);
-      const reply = await chatWithCompanion({
-        history: recent.slice(0, -1), // exclude the just-added message
+
+      // If the user has opted in to memory, prepend a synthetic "user"
+      // turn at the front of the history that lists what they've asked
+      // the Companion to remember. We do NOT commit this synthetic
+      // turn to localStorage — it only goes to the LLM for context.
+      let historyForCall = recent.slice(0, -1);
+      if (memoryEnabled && memories.length > 0) {
+        const lines = memories
+          .map((m) => `• ${m.topic}${m.note ? ' — ' + m.note : ''}`)
+          .join('\n');
+        historyForCall = [
+          {
+            role: 'user',
+            text:
+              "Note for context — these are things I've explicitly asked you to remember about me. " +
+              "Use them lightly; don't recite them back unless relevant:\n" +
+              lines,
+          },
+          ...historyForCall,
+        ];
+      }
+
+      const result = await chatWithCompanion({
+        history: historyForCall,
         message: t,
       });
       setHistory((cur) => [
         ...cur,
-        { role: 'assistant', text: reply, ts: Date.now() },
+        {
+          role: 'assistant',
+          text: result.reply,
+          ts: Date.now(),
+          synthetic: result.synthetic,
+        },
       ]);
     } catch (e) {
       setError(e.message || 'Something went wrong.');
@@ -101,9 +148,73 @@ export default function Companion() {
     }
   };
 
-  const reset = () => {
-    if (!confirm('Clear this conversation? This cannot be undone.')) return;
+  const reset = () => setConfirmReset(true);
+  const doReset = () => {
     setHistory([GREETING]);
+    setConfirmReset(false);
+  };
+
+  // ---- Companion memory (opt-in) ----
+  const [memoryEnabled, setMemoryEnabled] = useState(false);
+  const [memories, setMemories] = useState([]);
+  const [showMemoryPanel, setShowMemoryPanel] = useState(false);
+  const [memoryTopic, setMemoryTopic] = useState('');
+  const [memoryNote, setMemoryNote] = useState('');
+  const [memBusy, setMemBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const u = await getUser(user.uid);
+        if (mounted) setMemoryEnabled(!!u?.companionMemoryEnabled);
+      } catch {
+        // ignore — assume off
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [user.uid]);
+
+  useEffect(() => {
+    if (!memoryEnabled) {
+      setMemories([]);
+      return undefined;
+    }
+    return watchCompanionMemory(user.uid, setMemories);
+  }, [memoryEnabled, user.uid]);
+
+  const toggleMemory = async () => {
+    const next = !memoryEnabled;
+    setMemoryEnabled(next);
+    try {
+      if (!next) {
+        // Turning OFF wipes existing memories.
+        await wipeCompanionMemory();
+      } else {
+        await updateProfile(user.uid, { companionMemoryEnabled: true });
+      }
+    } catch (e) {
+      setMemoryEnabled(!next); // revert on failure
+      setError(e?.message || 'Could not update memory setting.');
+    }
+  };
+
+  const saveMemory = async (e) => {
+    e.preventDefault();
+    const t = memoryTopic.trim();
+    if (!t) return;
+    setMemBusy(true);
+    try {
+      await saveCompanionMemoryItem({ topic: t, note: memoryNote.trim() });
+      setMemoryTopic('');
+      setMemoryNote('');
+    } catch (e2) {
+      setError(e2?.message || 'Could not save.');
+    } finally {
+      setMemBusy(false);
+    }
   };
 
   return (
@@ -112,12 +223,24 @@ export default function Companion() {
         <div>
           <h1>AI Companion</h1>
           <p>
-            Always-on, gentle listener. For tough moments, reach out to a{' '}
+            Always-on, gentle listener — speak in any language you're comfortable
+            with: English, <span lang="hi">हिंदी</span>, Hinglish, switch as you go.
+            For tough moments, please reach out to a{' '}
             <strong>real human helper</strong> from "Find a Helper".
           </p>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <span className="pill pill-info">🌐 multi-lingual</span>
           <span className="pill pill-info">private to this device</span>
+          {memoryEnabled && (
+            <span className="pill pill-success">memory: on</span>
+          )}
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setShowMemoryPanel((v) => !v)}
+          >
+            🧠 Memory
+          </button>
           <button className="btn btn-ghost btn-sm" onClick={reset}>
             Clear chat
           </button>
@@ -183,6 +306,97 @@ export default function Companion() {
         </form>
       </div>
 
+      {showMemoryPanel && (
+        <div className="card mt-3 memory-panel">
+          <div className="card-h">
+            <h3>🧠 Companion memory</h3>
+            <label className="row" style={{ gap: 6, fontSize: 13, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={memoryEnabled}
+                onChange={toggleMemory}
+              />
+              {memoryEnabled ? 'Enabled' : 'Off'}
+            </label>
+          </div>
+          <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+            Optional. When on, you can save a few notes (like <em>"presentation today"</em>) the
+            Companion can refer to in this and future sessions. Stored privately to your account.
+            Turning memory off wipes everything — no questions asked.
+          </p>
+
+          {memoryEnabled && (
+            <>
+              <form className="row" style={{ gap: 8, flexWrap: 'wrap' }} onSubmit={saveMemory}>
+                <input
+                  placeholder="Topic — e.g. presentation today"
+                  value={memoryTopic}
+                  onChange={(e) => setMemoryTopic(e.target.value)}
+                  maxLength={120}
+                  style={{ flex: '1 1 220px', minWidth: 0 }}
+                />
+                <input
+                  placeholder="Optional note"
+                  value={memoryNote}
+                  onChange={(e) => setMemoryNote(e.target.value)}
+                  maxLength={400}
+                  style={{ flex: '2 1 280px', minWidth: 0 }}
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={memBusy || !memoryTopic.trim()}
+                >
+                  {memBusy ? '…' : 'Remember'}
+                </button>
+              </form>
+
+              <div className="stack mt-3">
+                {memories.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 13 }}>
+                    No memories saved yet. Add one above.
+                  </div>
+                ) : (
+                  memories.map((m) => (
+                    <div
+                      key={m.id}
+                      className="row between"
+                      style={{
+                        padding: 10,
+                        border: '1px solid var(--border)',
+                        borderRadius: 8,
+                        gap: 10,
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontWeight: 600 }}>{m.topic}</div>
+                        {m.note && (
+                          <div className="muted" style={{ fontSize: 13 }}>{m.note}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="row mt-3" style={{ justifyContent: 'flex-end' }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={async () => {
+                    if (!confirm('Wipe all saved memories? This cannot be undone.')) return;
+                    await wipeCompanionMemory();
+                    setMemoryEnabled(false);
+                  }}
+                >
+                  Wipe everything
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="pill pill-danger" style={{ marginBottom: 12 }}>
           {error}
@@ -191,7 +405,42 @@ export default function Companion() {
 
       <div className="muted" style={{ fontSize: 12, padding: '0 8px' }}>
         AI Companion is not a therapist. For diagnoses, medication, or ongoing therapy please consult
-        a licensed professional. In a crisis, call iCall (+91 9152987821) or Vandrevala (+91 1860-2662-345).
+        a licensed professional. In a crisis, dial Tele-MANAS at 14416 (24×7, 20 languages) or
+        Vandrevala (+91 1860-2662-345).
+      </div>
+
+      {showCrisis && <CrisisModal onClose={() => setShowCrisis(false)} />}
+      {confirmReset && (
+        <ConfirmModal
+          title="Clear this conversation?"
+          body="Your chat history with the Companion lives only on this device — once cleared it can't be recovered."
+          confirmLabel="Clear chat"
+          confirmVariant="danger"
+          onConfirm={doReset}
+          onCancel={() => setConfirmReset(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Lightweight, on-brand confirmation modal — replaces native confirm()
+// which is ugly, focus-trapping-broken, and inaccessible.
+function ConfirmModal({ title, body, confirmLabel, confirmVariant, onConfirm, onCancel }) {
+  useEscapeKey(onCancel);
+  return (
+    <div className="modal-back" onClick={onCancel} role="dialog" aria-modal="true">
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+        <h3 style={{ marginTop: 0 }}>{title}</h3>
+        {body && <p className="muted">{body}</p>}
+        <div className="row" style={{ gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+          <button className="btn btn-ghost" onClick={onCancel} autoFocus>
+            Cancel
+          </button>
+          <button className={`btn btn-${confirmVariant || 'primary'}`} onClick={onConfirm}>
+            {confirmLabel || 'Confirm'}
+          </button>
+        </div>
       </div>
     </div>
   );

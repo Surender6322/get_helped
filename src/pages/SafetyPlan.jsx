@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import { saveSafetyPlan, getSafetyPlan, getHelplines } from '../services/api.js';
+import HeartLoader from '../components/HeartLoader.jsx';
 
 const STEPS = [
   {
@@ -41,6 +42,16 @@ const STEPS = [
     title: '6. Making my environment safer',
     help: "Steps to limit access to anything you might use to harm yourself.",
     placeholder: 'e.g. Give my medicines to my flatmate, lock kitchen drawer key with hostel warden…',
+  },
+  {
+    // Stanley & Brown's original SPI included a "reasons for living"
+    // step. The VA's free Safety Plan app tracks this as the single
+    // most-used feature in field reviews.
+    key: 'reasons_to_live',
+    title: '7. My reasons to keep going',
+    help: 'Names, places, future things, even tiny stuff. Whatever you would miss, or what would miss you. Read this first when you reach for the plan.',
+    placeholder:
+      'e.g. My dog Bruno · The smell of monsoon · My sister\'s wedding next year · The chai stall guy who knows my order…',
   },
 ];
 
@@ -80,7 +91,7 @@ export default function SafetyPlan() {
     }
   };
 
-  if (!loaded) return <div className="loader">Loading your plan…</div>;
+  if (!loaded) return <HeartLoader label="Loading your plan…" />;
 
   const filledSteps = STEPS.filter((s) => (plan[s.key] || '').trim()).length;
 

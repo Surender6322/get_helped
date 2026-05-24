@@ -159,23 +159,25 @@ label {
   margin-top: 12px;
 }
 
-/* `.main` uses block layout so block-level children automatically stretch
-   to fill its width — flex-column on .main was preventing nested grids
-   from expanding to the available space. */
+/* `.main` is a flex column. Children that should fill remaining vertical
+   space (chat / companion / any "page-fill" content) opt in via flex:1,
+   while ordinary content pages use intrinsic height and let .main scroll. */
 .main {
   padding: 28px 32px;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* allow the flex children to shrink and scroll internally */
 }
 
 /* Page wrapper for chat-style pages whose body should fill the visible
-   viewport (AI Companion). */
+   viewport (AI Companion + the regular conversations page). The wrapper
+   itself never scrolls — its inner messages area does. */
 .page-fill {
   display: flex;
   flex-direction: column;
-  /* Subtract a generous estimate for the chrome above (emergency banner +
-     optional notification prompt + page header). The card is always a
-     comfortable height even if the estimate is slightly off. */
-  min-height: calc(100dvh - 220px);
+  flex: 1;
+  min-height: 0;
 }
 .companion-shell {
   flex: 1;
@@ -184,9 +186,6 @@ label {
   min-height: 0;
   margin-bottom: 12px;
 }
-
-/* Same idea for the regular chat shell — fill remaining space inside .main. */
-.main .chat-shell { min-height: calc(100dvh - 220px); }
 .page-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
 .page-h h1 { margin: 0; font-size: 22px; }
 .page-h p { margin: 0; color: var(--text-muted); font-size: 14px; }
@@ -352,8 +351,150 @@ label {
   flex: 1; padding: 10px;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: #fff; font-weight: 600; color: var(--text-muted);
+  cursor: pointer;
 }
 .auth-card .role-pick button.active { border-color: var(--primary); color: var(--primary); background: var(--primary-50); }
+
+/* Richer role picker for the registration page */
+.role-pick--rich { gap: 10px; }
+.role-pick--rich button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 4px;
+  padding: 14px;
+  line-height: 1.3;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.05s ease;
+}
+.role-pick--rich button:hover { border-color: var(--primary); }
+.role-pick--rich button:active { transform: scale(0.98); }
+.role-pick--rich .role-emoji { font-size: 22px; }
+.role-pick--rich .role-title { font-weight: 600; font-size: 14px; color: var(--text); }
+.role-pick--rich button.active .role-title { color: var(--primary); }
+.role-pick--rich .role-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* Make the registration card a touch wider so two role tiles + form
+   never feel cramped on small viewports. */
+.auth-card--register { max-width: 460px; }
+
+/* Friendlier label hint shown in lighter type */
+.form-row label { display: flex; flex-direction: column; gap: 2px; }
+.form-row .form-hint {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Password input with show/hide affordance */
+.pwd-wrap { position: relative; display: flex; align-items: stretch; }
+.pwd-wrap input { padding-right: 64px; flex: 1; }
+.pwd-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.pwd-toggle:hover { background: var(--bg); color: var(--text); }
+
+/* Password strength meter — four segments + a tiny label */
+.pwd-meter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.pwd-meter span {
+  height: 4px;
+  flex: 1;
+  background: var(--border);
+  border-radius: 2px;
+  transition: background 0.2s ease;
+}
+.pwd-meter em {
+  margin-left: 6px;
+  font-style: normal;
+  color: var(--text-muted);
+}
+.pwd-meter--too-short span:nth-child(-n+1),
+.pwd-meter--weak       span:nth-child(-n+1) { background: var(--danger); }
+.pwd-meter--fair       span:nth-child(-n+2) { background: var(--warn); }
+.pwd-meter--good       span:nth-child(-n+3) { background: var(--accent); }
+.pwd-meter--strong     span:nth-child(-n+4) { background: var(--accent-600); }
+.pwd-meter--too-short em { color: var(--danger); }
+
+/* Inline form error block — replaces a misused .pill .pill-danger */
+.form-error {
+  background: var(--primary-50);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--danger);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+[data-theme='dark'] .form-error {
+  background: #2a1f2c;
+  border-color: var(--border);
+  border-left-color: var(--danger);
+}
+
+/* Smaller copyright-style note under the auth form */
+.auth-footnote {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* Trust signals on the auth-hero */
+.trust-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trust-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text);
+}
+.trust-list .tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #0e3f2c;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+[data-theme='dark'] .trust-list .tick {
+  background: var(--accent);
+  color: #0f1626;
+}
 @media (max-width: 900px) {
   .auth-wrap { grid-template-columns: 1fr; }
   .auth-hero { display: none; }
@@ -363,8 +504,8 @@ label {
 .chat-shell {
   display: grid;
   grid-template-columns: 280px 1fr;
-  flex: 1;             /* fill remaining vertical space inside .main */
-  min-height: 360px;   /* but never collapse smaller than this */
+  flex: 1 1 auto;      /* fill remaining vertical space inside flex parent */
+  min-height: 0;       /* allow children to scroll inside instead of growing */
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -382,18 +523,63 @@ label {
 }
 .chat-list-item:hover { background: var(--primary-50); }
 .chat-list-item.active { background: var(--primary-50); border-left: 3px solid var(--primary); padding-left: 13px; }
+.chat-list-search {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.chat-list-search input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+.chat-list-search input::placeholder { color: var(--text-muted); }
+.chat-list-search input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-50);
+}
 .chat-list-item .name { font-weight: 600; font-size: 14px; }
 .chat-list-item .preview { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-.chat-pane { display:flex; flex-direction: column; }
-.chat-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* lets nested .chat-msgs scroll instead of growing pane */
+}
+.chat-header {
+  flex-shrink: 0;          /* never collapse the header */
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-elev);
+}
 .chat-header .name { font-weight: 600; }
 .chat-header .meta { font-size: 12px; color: var(--text-muted); }
-.chat-msgs { flex: 1; overflow-y: auto; padding: 18px; background: #fafbfd; display: flex; flex-direction: column; gap: 8px; }
+.chat-msgs {
+  flex: 1 1 0;
+  min-height: 0;          /* required for nested scroll inside flex */
+  overflow-y: auto;
+  padding: 18px;
+  background: #fafbfd;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .msg { max-width: 70%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.4; }
 .msg.me { align-self: flex-end; background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
 .msg.them { align-self: flex-start; background: #fff; border: 1px solid var(--border); border-bottom-left-radius: 4px; }
 .msg .ts { display: block; font-size: 10px; opacity: 0.7; margin-top: 4px; }
 .chat-input {
+  flex-shrink: 0;          /* always pinned at the bottom of the pane */
   padding: 12px 14px;
   border-top: 1px solid var(--border);
   display: flex;
@@ -500,10 +686,94 @@ label {
 .modal h3 { margin: 0 0 8px; }
 .modal .close { float: right; color: var(--text-muted); font-size: 22px; line-height: 1; }
 
-/* Loader */
+/* Loader (legacy text-only fallback) */
 .loader {
   display: flex; align-items: center; justify-content: center;
   padding: 40px; color: var(--text-muted);
+}
+
+/* On-brand heart loader */
+.heart-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  min-height: 200px;
+}
+.heart-loader--inline { padding: 8px 0; min-height: 0; gap: 8px; }
+.heart-loader__heart {
+  filter: drop-shadow(0 6px 16px rgba(91, 127, 222, 0.35));
+  transform-origin: center;
+  animation: heart-beat 1.2s ease-in-out infinite;
+}
+.heart-loader__path {
+  /* gentle stroke draw effect on first mount */
+  animation: heart-glow 2.4s ease-in-out infinite;
+}
+.heart-loader__shine {
+  /* sweeping highlight that runs across the heart */
+  animation: heart-shine 2.4s ease-in-out infinite;
+  transform-origin: center;
+}
+.heart-loader__dots {
+  display: inline-flex; gap: 6px;
+}
+.heart-loader__dots span {
+  width: 6px; height: 6px;
+  background: var(--primary);
+  border-radius: 50%;
+  display: inline-block;
+  opacity: 0.4;
+  animation: heart-dot 1.2s ease-in-out infinite;
+}
+.heart-loader__dots span:nth-child(2) { animation-delay: 0.18s; }
+.heart-loader__dots span:nth-child(3) { animation-delay: 0.36s; }
+.heart-loader__label {
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+@keyframes heart-beat {
+  0%, 100% { transform: scale(1); }
+  20%      { transform: scale(1.12); }
+  40%      { transform: scale(0.96); }
+  60%      { transform: scale(1.06); }
+  80%      { transform: scale(0.98); }
+}
+@keyframes heart-glow {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.18); }
+}
+@keyframes heart-shine {
+  0%   { transform: translateX(-30%); opacity: 0; }
+  35%  { opacity: 0.9; }
+  70%  { transform: translateX(30%); opacity: 0; }
+  100% { transform: translateX(30%); opacity: 0; }
+}
+@keyframes heart-dot {
+  0%, 100% { transform: translateY(0); opacity: 0.4; }
+  35%      { transform: translateY(-4px); opacity: 1; }
+}
+
+/* Respect users who prefer less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .heart-loader__heart,
+  .heart-loader__path,
+  .heart-loader__shine,
+  .heart-loader__dots span,
+  .typing-dot,
+  .toast-host .toast,
+  .crisis-modal {
+    animation: none !important;
+    transition: none !important;
+  }
+  /* Heart loader fallback — quietly visible without the beat. */
+  .heart-loader__heart {
+    animation: none;
+  }
 }
 
 /* Crisis-flagged messages (helper view) */
@@ -533,10 +803,14 @@ label {
 }
 
 /* Soft crisis prompt banner above the chat input */
+/* Soft amber, not red. The crisis-prompt offers help — it's not an
+   alarm. We reserve red strictly for "emergency, call now" buttons.
+   Source: Calm + Headspace use cool/warm palettes to denote
+   reassurance vs. urgency; mixing both confuses panicking users. */
 .crisis-prompt {
-  background: #fbe6e4;
-  border-top: 2px solid #f5c0bb;
-  color: #7c2a25;
+  background: #fdf6e6;
+  border-top: 2px solid #f0d79b;
+  color: #6b4a13;
   padding: 12px 14px;
   display: flex;
   align-items: center;
@@ -575,6 +849,60 @@ label {
   background: #2c1715;
   border-color: #6b3530;
 }
+
+/* Library cards.
+   Long content rule of thumb across the app: long bodies must scroll
+   *inside their own card*, never push the whole page. Collapsed = clamp
+   to a few lines with a fade. Expanded = give the body a bounded
+   max-height with internal overflow, so the page chrome (sidebar,
+   filters, header) stays put. */
+.library-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  background: var(--bg-elev);
+}
+.library-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.library-kind { font-size: 22px; line-height: 1; }
+.library-title { font-weight: 700; font-size: 15px; line-height: 1.3; }
+.library-body {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 6.4em;
+  overflow: hidden;
+  position: relative;
+  mask-image: linear-gradient(180deg, #000 70%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
+}
+.library-body.is-expanded {
+  max-height: min(55vh, 540px);
+  overflow-y: auto;
+  padding-right: 6px; /* room for the scrollbar */
+  mask-image: none;
+  -webkit-mask-image: none;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+/* Subtle scrollbar styling so the in-card scroll feels intentional. */
+.library-body.is-expanded::-webkit-scrollbar { width: 8px; }
+.library-body.is-expanded::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.library-toggle {
+  display: block;
+  margin: 10px auto 0;
+}
+[data-theme='dark'] .library-card { background: #131c33; }
 
 /* Sidebar unread badge */
 .nav-badge {
@@ -627,7 +955,7 @@ label {
 [data-theme='dark'] .msg.them { background: var(--surface); }
 [data-theme='dark'] .msg.msg-crisis-high { background: #3a1c1a; color: #fbe2df; }
 [data-theme='dark'] .msg.msg-crisis-medium { background: #3a2918; color: #fbe9d2; }
-[data-theme='dark'] .crisis-prompt { background: #3a1c1a; color: #fbe2df; border-top-color: #6b3530; }
+[data-theme='dark'] .crisis-prompt { background: #3a2918; color: #f3c481; border-top-color: #6b5530; }
 [data-theme='dark'] .emergency-banner {
   background: linear-gradient(90deg, #3a1c1a, #3a2918);
   border-color: #6b3530;
@@ -638,6 +966,59 @@ label {
 [data-theme='dark'] .pill-warn { background: #3a2918; color: #f3c481; }
 [data-theme='dark'] .pill-danger { background: #3a1c1a; color: #f3a09a; }
 [data-theme='dark'] .pill-info { background: var(--primary-50); color: var(--primary); }
+
+/* Dashboard self-help tip card */
+.tip {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+.tip-title { font-weight: 600; margin-bottom: 4px; color: var(--text); }
+[data-theme='dark'] .tip { background: #131c33; }
+
+/* Inline alert cards (warn / info) — themeable variants of .card */
+.alert-warn {
+  background: #fdf6e6;
+  border-color: #f0d79b;
+  color: #6b4a13;
+}
+[data-theme='dark'] .alert-warn {
+  background: #3a2918;
+  border-color: #6b5530;
+  color: #f3c481;
+}
+
+/* Hardcoded-light surfaces that previously had no dark variant */
+[data-theme='dark'] .chat-shell { background: var(--surface); }
+[data-theme='dark'] .chat-input { background: var(--surface); }
+[data-theme='dark'] .mood-chip { background: var(--surface); color: var(--text); }
+[data-theme='dark'] .mood-chip.active {
+  background: var(--primary-50);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+[data-theme='dark'] .modal { background: var(--surface); color: var(--text); }
+[data-theme='dark'] .auth-card .role-pick button {
+  background: var(--surface);
+  color: var(--text-muted);
+}
+[data-theme='dark'] .auth-card .role-pick button.active {
+  background: var(--primary-50);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* Text-selection highlight — was hard to read with browser defaults
+   (light-blue on white text in dark mode made selected titles invisible). */
+::selection {
+  background: var(--primary);
+  color: #fff;
+}
+[data-theme='dark'] ::selection {
+  background: var(--primary);
+  color: #0f1626;
+}
 
 /* In-app toast notifications */
 .toast-host {
@@ -703,3 +1084,110 @@ label {
   cursor: pointer;
 }
 .theme-toggle:hover { background: var(--bg); color: var(--text); }
+
+.lang-switch {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.lang-switch .btn { flex: 1; padding: 6px 8px; font-size: 13px; }
+
+.memory-panel { border-left: 3px solid var(--accent); }
+.memory-panel .card-h { margin-bottom: 6px; }
+
+/* ====================================================================
+   Accessibility & content polish (added in Phase 1 audit response)
+   ==================================================================== */
+
+/* Visually-hidden but screen-reader-readable. */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Mood-tracker compassion check-in — soft amber, not red. */
+.mood-checkin {
+  border-left: 3px solid #f0c46d;
+  background: #fffbf0;
+}
+[data-theme='dark'] .mood-checkin {
+  border-left-color: #b5832b;
+  background: #2c2516;
+  color: #f3d391;
+}
+
+/* Crisis modal — non-dismissable visual cue (drop shadow + slight pulse on
+   the border so the user notices an explicit "I'm safer for now" exit). */
+.modal-back.crisis-back { backdrop-filter: blur(2px); background: rgba(13, 19, 37, 0.55); }
+.crisis-modal {
+  border: 2px solid #f0d79b;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+[data-theme='dark'] .crisis-modal { border-color: #6b5530; }
+
+/* ---- Quick-exit floating button --------------------------------- */
+
+.quick-exit-btn {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(6px);
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+.quick-exit-btn:hover {
+  transform: translateY(-1px);
+  background: #fff;
+  color: var(--text);
+}
+.quick-exit-btn:focus-visible {
+  outline: 2px solid var(--accent-600);
+  outline-offset: 2px;
+}
+[data-theme='dark'] .quick-exit-btn {
+  background: rgba(19, 28, 51, 0.92);
+  color: var(--text-muted);
+}
+[data-theme='dark'] .quick-exit-btn:hover { background: #1c2745; color: var(--text); }
+@media (max-width: 600px) {
+  /* Keep the exit visible but tuck the label so it's a thumb-target.
+     Sits above the mobile bottom nav (none here) and inside safe area. */
+  .quick-exit-btn { padding: 8px 10px; }
+  .quick-exit-btn__label { display: none; }
+}
+
+/* ---- Devanagari / Bengali / Tamil typography -------------------- */
+/* Use Noto Sans script-specific stacks so Hindi / Bengali / Tamil
+   render at a comfortable size and line-height. Latin text is
+   unaffected (browser falls back to existing system stack). */
+[lang="hi"], [lang="mr"] {
+  font-family: 'Noto Sans Devanagari', 'Mangal', 'Sakal Bharati', system-ui, sans-serif;
+  line-height: 1.65;
+}
+[lang="bn"] {
+  font-family: 'Noto Sans Bengali', 'Vrinda', 'Kalpurush', system-ui, sans-serif;
+  line-height: 1.7;
+}
+[lang="ta"] {
+  font-family: 'Noto Sans Tamil', 'Latha', 'Vijaya', system-ui, sans-serif;
+  line-height: 1.7;
+}
