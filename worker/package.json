@@ -1,0 +1,19 @@
+{
+  "name": "gethelped-ai-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cloudflare Worker that proxies AI Companion calls to Gemini, keeping the API key off the browser and out of any client bundle.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "secret": "wrangler secret put GEMINI_API_KEY"
+  },
+  "dependencies": {
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "wrangler": "^3.86.1"
+  }
+}

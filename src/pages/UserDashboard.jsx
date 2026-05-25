@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { watchHelpers, watchMoods, watchChatsFor, getUser } from '../services/api.js';
+import { watchHelpers, watchMoods, watchChatsFor } from '../services/api.js';
+import { usePartnerNames } from '../utils/partnerCache.js';
 
 const moodEmoji = {
   great: '😄',
@@ -16,7 +17,6 @@ export default function UserDashboard() {
   const [helpers, setHelpers] = useState([]);
   const [moods, setMoods] = useState([]);
   const [chats, setChats] = useState([]);
-  const [helperNames, setHelperNames] = useState({});
 
   useEffect(
     () => watchHelpers((rows) => setHelpers(rows), { verifiedOnly: true, availableOnly: true }),
@@ -25,18 +25,13 @@ export default function UserDashboard() {
   useEffect(() => watchMoods(user.uid, setMoods), [user.uid]);
   useEffect(() => watchChatsFor(user.uid, setChats), [user.uid]);
 
-  useEffect(() => {
-    (async () => {
-      const map = {};
-      for (const c of chats) {
-        if (!map[c.helperUid]) {
-          const u = await getUser(c.helperUid);
-          map[c.helperUid] = u?.displayName || 'Helper';
-        }
-      }
-      setHelperNames(map);
-    })();
-  }, [chats]);
+  // Only fetch helper names for the chats actually rendered (top 3).
+  const visibleChats = useMemo(() => chats.slice(0, 3), [chats]);
+  const visibleHelperUids = useMemo(
+    () => visibleChats.map((c) => c.helperUid).filter(Boolean),
+    [visibleChats],
+  );
+  const helperPartners = usePartnerNames(visibleHelperUids);
 
   const latestMood = moods[0];
 
@@ -94,10 +89,10 @@ export default function UserDashboard() {
             <div className="empty">No conversations yet. Start one from the Helpers page.</div>
           ) : (
             <div className="stack-sm">
-              {chats.slice(0, 3).map((c) => (
+              {visibleChats.map((c) => (
                 <Link key={c.id} to={`/app/chat/${c.id}`} className="row between" style={{ textDecoration: 'none', color: 'inherit' }}>
                   <div>
-                    <div style={{ fontWeight: 600 }}>{helperNames[c.helperUid] || 'Helper'}</div>
+                    <div style={{ fontWeight: 600 }}>{helperPartners[c.helperUid]?.displayName || '…'}</div>
                     <div className="muted" style={{ fontSize: 12 }}>{c.lastMessage || 'New conversation'}</div>
                   </div>
                   <span className="pill pill-info">open</span>
@@ -109,7 +104,7 @@ export default function UserDashboard() {
       </div>
 
       <div className="card mt-4">
-        <div className="card-h"><h3>Quick self-help</h3><Link className="muted" to="/app/resources">Browse library</Link></div>
+        <div className="card-h"><h3>Quick self-help</h3><Link className="muted" to="/app/library">Browse library</Link></div>
         <div className="grid grid-3">
           <Tip
             title="4-7-8 breathing"
@@ -131,8 +126,8 @@ export default function UserDashboard() {
 
 function Tip({ title, body }) {
   return (
-    <div style={{ padding: 14, border: '1px solid var(--border)', borderRadius: 10, background: '#fafbfd' }}>
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>{title}</div>
+    <div className="tip">
+      <div className="tip-title">{title}</div>
       <div className="muted" style={{ fontSize: 13 }}>{body}</div>
     </div>
   );

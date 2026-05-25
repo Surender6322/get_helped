@@ -7,7 +7,6 @@ import UserDashboard from './pages/UserDashboard.jsx';
 import HelperDashboard from './pages/HelperDashboard.jsx';
 import AdminDashboard from './pages/AdminDashboard.jsx';
 import Chat from './pages/Chat.jsx';
-import Resources from './pages/Resources.jsx';
 import Mood from './pages/Mood.jsx';
 import Profile from './pages/Profile.jsx';
 import HelperList from './pages/HelperList.jsx';
@@ -15,14 +14,32 @@ import Wall from './pages/Wall.jsx';
 import Journal from './pages/Journal.jsx';
 import SafetyPlan from './pages/SafetyPlan.jsx';
 import Companion from './pages/Companion.jsx';
+import Library from './pages/Library.jsx';
+import HelperSupervision from './pages/HelperSupervision.jsx';
 import AppLayout from './components/AppLayout.jsx';
+import HeartLoader from './components/HeartLoader.jsx';
 
 function Protected({ children, role }) {
   const { user, loading } = useAuth();
-  if (loading) return <div className="loader">Loading…</div>;
+  if (loading) return <FullPageLoader label="Signing you in…" />;
   if (!user) return <Navigate to="/login" replace />;
   if (role && user.role !== role) return <Navigate to={defaultRouteFor(user.role)} replace />;
   return children;
+}
+
+function FullPageLoader({ label }) {
+  return (
+    <div
+      style={{
+        minHeight: '100dvh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <HeartLoader size={72} label={label} />
+    </div>
+  );
 }
 
 function defaultRouteFor(role) {
@@ -33,7 +50,7 @@ function defaultRouteFor(role) {
 
 export default function App() {
   const { user, loading } = useAuth();
-  if (loading) return <div className="loader">Loading…</div>;
+  if (loading) return <FullPageLoader label="Just a moment…" />;
 
   return (
     <Routes>
@@ -58,7 +75,8 @@ export default function App() {
         <Route path="companion" element={<Companion />} />
         <Route path="mood" element={<Mood />} />
         <Route path="safety-plan" element={<SafetyPlan />} />
-        <Route path="resources" element={<Resources />} />
+        <Route path="library" element={<Library />} />
+        <Route path="resources" element={<Navigate to="/app/library" replace />} />
         <Route path="profile" element={<Profile />} />
       </Route>
 
@@ -74,7 +92,9 @@ export default function App() {
         <Route path="chat" element={<Chat />} />
         <Route path="chat/:chatId" element={<Chat />} />
         <Route path="wall" element={<Wall />} />
-        <Route path="resources" element={<Resources />} />
+        <Route path="supervision" element={<HelperSupervision />} />
+        <Route path="library" element={<Library />} />
+        <Route path="resources" element={<Navigate to="/helper/library" replace />} />
         <Route path="profile" element={<Profile />} />
       </Route>
 
@@ -87,6 +107,8 @@ export default function App() {
         }
       >
         <Route index element={<AdminDashboard />} />
+        <Route path="library" element={<Library />} />
+        <Route path="supervision" element={<HelperSupervision />} />
         <Route path="profile" element={<Profile />} />
       </Route>
 

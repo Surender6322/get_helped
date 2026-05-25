@@ -1,0 +1,12 @@
+name = "gethelped-ai-proxy"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# Override-able via `wrangler deploy --var ALLOWED_ORIGIN:...`
+[vars]
+ALLOWED_ORIGIN = "https://get-helped.web.app"
+FIREBASE_PROJECT_ID = "get-helped"
+
+# GEMINI_API_KEY is set as a SECRET, not a var:
+#   wrangler secret put GEMINI_API_KEY

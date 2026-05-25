@@ -20,9 +20,15 @@ import {
   query,
   where,
   orderBy,
+  limit as fbLimit,
   onSnapshot,
   getDocs,
   serverTimestamp,
+  deleteDoc,
+  arrayUnion,
+  arrayRemove,
+  increment,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   ref as rtdbRef,
@@ -36,6 +42,54 @@ import {
 
 import { auth, db, rtdb, USE_DEMO } from './firebase.js';
 import { mock } from './mockBackend.js';
+
+// ===== usersPublic mirror helpers =====
+//
+// On Spark we don't have a Cloud Function trigger to mirror /users
+// into /usersPublic. Instead the client mirrors its own profile on
+// every relevant write. Rules pin this to the writer's own uid + a
+// strict field allowlist, so a client can't poison another user's
+// public projection.
+
+const PUBLIC_USER_FIELDS = [
+  'displayName',
+  'role',
+  'verified',
+  'available',
+  'helperStatus',
+  'lastAvailableAt',
+  'tags',
+  'bio',
+];
+
+function projectPublicFields(data) {
+  if (!data) return null;
+  const out = {};
+  for (const k of PUBLIC_USER_FIELDS) {
+    if (data[k] !== undefined) out[k] = data[k];
+  }
+  return out;
+}
+
+// Mirror a user's public-safe fields into /usersPublic/{uid}.
+// Best-effort: failures are swallowed so the primary write never breaks
+// because of the mirror.
+async function mirrorPublic(uid, fields) {
+  if (isDemo) return; // mock backend doesn't need a mirror
+  try {
+    await setDoc(
+      doc(db, 'usersPublic', uid),
+      {
+        uid,
+        ...projectPublicFields(fields),
+        syncedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } catch (e) {
+    console.warn('[GetHelped] usersPublic mirror failed (non-fatal):', e?.message || e);
+  }
+}
 
 // Whether we are *effectively* in demo mode (forced demo or missing config).
 export const isDemo = USE_DEMO || !auth;
@@ -56,6 +110,9 @@ export async function register({ email, password, role, displayName, credentials
       : {}),
   };
   await setDoc(doc(db, 'users', cred.user.uid), profile);
+  // Seed the public projection so cross-user lookups (chat partner names
+  // etc.) work without ever needing to read /users.
+  await mirrorPublic(cred.user.uid, profile);
   return profile;
 }
 
@@ -90,13 +147,72 @@ export async function updateProfile(uid, patch) {
   if (isDemo) return mock.updateProfile(uid, patch);
   await updateDoc(doc(db, 'users', uid), patch);
   const snap = await getDoc(doc(db, 'users', uid));
+  // Mirror only the public-safe subset of the patch.
+  const publicPatch = projectPublicFields(patch);
+  if (publicPatch && Object.keys(publicPatch).length > 0) {
+    await mirrorPublic(uid, snap.data());
+  }
   return snap.data();
+}
+
+function normalizeUser(data) {
+  if (!data) return data;
+  return {
+    ...data,
+    lastAvailableAt:
+      data.lastAvailableAt?.toMillis?.() ?? data.lastAvailableAt ?? null,
+  };
 }
 
 export async function getUser(uid) {
   if (isDemo) return mock.getUser(uid);
-  const snap = await getDoc(doc(db, 'users', uid));
-  return snap.exists() ? snap.data() : null;
+  // Self-read goes to our own private doc. Cross-user reads prefer
+  // usersPublic (post-Phase-2 architecture) and fall back to /users
+  // while backfill is pending — once usersPublic is populated and
+  // /users reads are locked down, the fallback becomes a no-op.
+  const meUid = auth?.currentUser?.uid;
+  if (meUid === uid) {
+    const snap = await getDoc(doc(db, `users/${uid}`));
+    return snap.exists() ? normalizeUser(snap.data()) : null;
+  }
+  const pubSnap = await getDoc(doc(db, `usersPublic/${uid}`));
+  if (pubSnap.exists()) return normalizeUser(pubSnap.data());
+  const fallback = await getDoc(doc(db, `users/${uid}`));
+  return fallback.exists() ? normalizeUser(fallback.data()) : null;
+}
+
+// Live-subscribe to a single user doc. Used in chat to keep partner
+// presence (`available`, `lastAvailableAt`) up to date without manual
+// reloads. Returns an unsubscribe function.
+export function watchUser(uid, cb) {
+  if (isDemo) return mock.watchUser(uid, cb);
+  const meUid = auth?.currentUser?.uid;
+  if (meUid === uid) {
+    return onSnapshot(doc(db, `users/${uid}`), (snap) => {
+      cb(snap.exists() ? normalizeUser(snap.data()) : null);
+    });
+  }
+  // Cross-user: try usersPublic first, fall back to /users transparently.
+  let pubExists = false;
+  let unsubFallback = null;
+  const unsubPub = onSnapshot(doc(db, `usersPublic/${uid}`), (snap) => {
+    if (snap.exists()) {
+      pubExists = true;
+      if (unsubFallback) {
+        unsubFallback();
+        unsubFallback = null;
+      }
+      cb(normalizeUser(snap.data()));
+    } else if (!pubExists && !unsubFallback) {
+      unsubFallback = onSnapshot(doc(db, `users/${uid}`), (s2) => {
+        cb(s2.exists() ? normalizeUser(s2.data()) : null);
+      });
+    }
+  });
+  return () => {
+    unsubPub();
+    if (unsubFallback) unsubFallback();
+  };
 }
 
 export async function findUserByEmail(email) {
@@ -140,6 +256,10 @@ export function watchHelpers(cb, opts = { verifiedOnly: true, availableOnly: fal
     send();
     return unsub;
   }
+  // PHASE 2 NOTE: long-term this should query usersPublic only. We
+  // still hit /users while the backfill+rules tighten happens, since
+  // older clients & projects without Functions deployed won't have
+  // populated usersPublic yet.
   const filters = [where('role', '==', 'helper')];
   if (opts.verifiedOnly) filters.push(where('verified', '==', true));
   if (opts.availableOnly) filters.push(where('available', '==', true));
@@ -169,14 +289,97 @@ export function watchAdmins(cb) {
   return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
 }
 
+// All `role: 'user'` accounts — used by the admin "Users" directory.
+export function watchAllUsers(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listAllUsers());
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'users'), where('role', '==', 'user'));
+  return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
+}
+
+// Helper verification has 4 states. We keep both the legacy `verified`
+// boolean (used widely across rules / UI) and an explicit
+// `verificationStatus` so the admin can distinguish a helper who's never
+// applied, one who's pending review, one who's been rejected, and one
+// whose verification was revoked.
+//
+//   verified=false, verificationStatus='pending'  → in admin pending list
+//   verified=true,  verificationStatus='verified' → live, in verified list
+//   verified=false, verificationStatus='rejected' → not shown anywhere
+//   verified=false, verificationStatus='revoked'  → not shown anywhere
+//
+// `rejected` and `revoked` differ only in label — both let the helper
+// re-submit credentials from their profile to re-enter the pending queue.
+
+export async function approveHelper(helperUid) {
+  if (isDemo) return mock.setHelperVerificationStatus(helperUid, 'verified');
+  await updateDoc(doc(db, 'users', helperUid), {
+    verified: true,
+    verificationStatus: 'verified',
+  });
+  // Admin path: write to /usersPublic for the helper too. Rules allow
+  // admin to write any usersPublic doc.
+  await mirrorPublic(helperUid, { verified: true });
+}
+
+export async function rejectHelper(helperUid) {
+  if (isDemo) return mock.setHelperVerificationStatus(helperUid, 'rejected');
+  await updateDoc(doc(db, 'users', helperUid), {
+    verified: false,
+    verificationStatus: 'rejected',
+    available: false,
+  });
+  await mirrorPublic(helperUid, { verified: false, available: false });
+}
+
+export async function revokeHelper(helperUid) {
+  if (isDemo) return mock.setHelperVerificationStatus(helperUid, 'revoked');
+  await updateDoc(doc(db, 'users', helperUid), {
+    verified: false,
+    verificationStatus: 'revoked',
+    available: false,
+  });
+  await mirrorPublic(helperUid, { verified: false, available: false });
+}
+
+// Helper resubmits their credentials for verification (from their profile).
+export async function resubmitForVerification(helperUid, credentials) {
+  if (isDemo) {
+    return mock.setHelperVerificationStatus(helperUid, 'pending', { credentials });
+  }
+  return updateDoc(doc(db, 'users', helperUid), {
+    credentials: credentials || '',
+    verificationStatus: 'pending',
+  });
+}
+
+// Legacy alias kept for places that still call setHelperVerification —
+// approve/revoke are clearer at the call site, but we don't break the API.
 export async function setHelperVerification(helperUid, verified) {
-  if (isDemo) return mock.setHelperVerification(helperUid, verified);
-  return updateDoc(doc(db, 'users', helperUid), { verified });
+  if (verified) return approveHelper(helperUid);
+  return revokeHelper(helperUid);
 }
 
 export async function setHelperAvailability(helperUid, available) {
   if (isDemo) return mock.setHelperAvailability(helperUid, available);
-  return updateDoc(doc(db, 'users', helperUid), { available });
+  // Always stamp lastAvailableAt on both transitions:
+  //   - going available  → "they were last 'available' at this moment" (now)
+  //   - going unavailable → "this is when they stopped being available" (now)
+  // Either way `now` is correct. Writing on both edges also means existing
+  // helpers don't need a special backfill — the next toggle of any kind
+  // populates the field.
+  await updateDoc(doc(db, 'users', helperUid), {
+    available,
+    lastAvailableAt: serverTimestamp(),
+  });
+  // Mirror availability + lastAvailableAt to /usersPublic so HelperList
+  // (which reads usersPublic) sees presence updates without ever
+  // touching the private /users collection.
+  await mirrorPublic(helperUid, { available, lastAvailableAt: serverTimestamp() });
 }
 
 // ----------------- Mood -----------------
@@ -188,6 +391,13 @@ export async function addMood({ uid, mood, note }) {
   });
 }
 
+// Edit an existing mood entry. Allowed only for the owner; on the
+// client side we additionally restrict to "today" entries (UX rule).
+export async function updateMood(id, { mood, note }) {
+  if (isDemo) return mock.updateMood(id, { mood, note });
+  return updateDoc(doc(db, 'moods', id), { mood, note: note || '' });
+}
+
 export function watchMoods(uid, cb) {
   if (isDemo) {
     const send = () => cb(mock.listMoods(uid));
@@ -197,7 +407,13 @@ export function watchMoods(uid, cb) {
   }
   const q = query(collection(db, 'moods'), where('uid', '==', uid), orderBy('ts', 'desc'));
   return onSnapshot(q, (snap) =>
-    cb(snap.docs.map((d) => ({ ...d.data(), ts: d.data().ts?.toMillis?.() ?? Date.now() })))
+    cb(
+      snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        ts: d.data().ts?.toMillis?.() ?? Date.now(),
+      })),
+    ),
   );
 }
 
@@ -243,17 +459,47 @@ export function watchChatsFor(uid, cb) {
     send();
     return unsub;
   }
-  const q1 = query(collection(db, 'chats'), where('userUid', '==', uid));
-  const q2 = query(collection(db, 'chats'), where('helperUid', '==', uid));
+  // We cap each side to a generous limit so a helper with thousands of
+  // historical chats doesn't pull them all on first paint. We deliberately
+  // *don't* `orderBy('lastTs')` server-side — that silently excludes any
+  // chat doc whose lastTs is missing/null (e.g. a brand-new chat where the
+  // server timestamp hasn't resolved yet, or legacy docs from older code
+  // paths). Sorting client-side handles those gracefully.
+  const CHAT_PAGE = 200;
+  const q1 = query(
+    collection(db, 'chats'),
+    where('userUid', '==', uid),
+    fbLimit(CHAT_PAGE),
+  );
+  const q2 = query(
+    collection(db, 'chats'),
+    where('helperUid', '==', uid),
+    fbLimit(CHAT_PAGE),
+  );
   let aRows = [], bRows = [];
   const emit = () => {
-    const merged = [...aRows, ...bRows].sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
+    const merged = [...aRows, ...bRows].sort(
+      (a, b) => (b.lastTs ?? b.createdAt ?? 0) - (a.lastTs ?? a.createdAt ?? 0),
+    );
     cb(merged);
   };
   const u1 = onSnapshot(q1, (s) => { aRows = s.docs.map((d) => normalizeChat(d.data())); emit(); });
   const u2 = onSnapshot(q2, (s) => { bRows = s.docs.map((d) => normalizeChat(d.data())); emit(); });
   return () => { u1(); u2(); };
 }
+
+// Phase 2 J — RTDB → Firestore migration, in dual-write mode.
+//
+// Why dual-write: the existing RTDB-backed chat history is the source
+// of truth for every existing user. Switching reads to Firestore today
+// would lose every prior message. Instead we:
+//   • dual-write every NEW message to BOTH RTDB and the new Firestore
+//     subcollection chats/{chatId}/messages
+//   • keep reads on RTDB for now (until a backfill/dump is run)
+//   • a follow-up sprint will run a one-shot migration of historical
+//     RTDB messages → Firestore, then flip reads.
+//
+// This deploy adds the Firestore-side path WITHOUT regressing anyone.
 
 export function watchMessages(chatId, cb) {
   if (isDemo) {
@@ -278,8 +524,20 @@ export async function sendMessage({ chatId, from, text }) {
   if (isDemo) return mock.sendMessage({ chatId, from, text });
   const r = rtdbRef(rtdb, `messages/${chatId}`);
   const newRef = push(r);
-  await set(newRef, { from, text, ts: Date.now() });
-  // also bump lastMessage on chat doc
+  const ts = Date.now();
+  // Write to RTDB (current source of truth) and Firestore subcollection
+  // in parallel. If Firestore fails we log but don't break the chat —
+  // the user's message still goes through via RTDB.
+  const rtdbWrite = set(newRef, { from, text, ts });
+  const fsWrite = addDoc(collection(db, `chats/${chatId}/messages`), {
+    from,
+    text,
+    ts: serverTimestamp(),
+    clientTs: ts,
+  }).catch((e) => {
+    console.warn('[GetHelped] Firestore mirror write failed (RTDB still authoritative):', e?.message || e);
+  });
+  await Promise.all([rtdbWrite, fsWrite]);
   await updateDoc(doc(db, 'chats', chatId), {
     lastMessage: text,
     lastTs: serverTimestamp(),
@@ -353,14 +611,17 @@ export function watchWallPosts(cb) {
 export async function toggleHeartWallPost({ postId, uid }) {
   if (isDemo) return mock.toggleHeartWallPost({ postId, uid });
   const ref = doc(db, 'wallPosts', postId);
+  // Atomic check-and-toggle: read once to know which side to flip,
+  // then commit with arrayUnion/arrayRemove + increment so concurrent
+  // hearts from different users never lose a count. (See library
+  // toggleLibraryLike for the same pattern.)
   const snap = await getDoc(ref);
   if (!snap.exists()) return;
   const data = snap.data();
-  const heartUids = Array.isArray(data.heartUids) ? data.heartUids : [];
-  const has = heartUids.includes(uid);
+  const has = Array.isArray(data.heartUids) && data.heartUids.includes(uid);
   await updateDoc(ref, {
-    heartUids: has ? heartUids.filter((u) => u !== uid) : [...heartUids, uid],
-    hearts: has ? Math.max(0, (data.hearts || 0) - 1) : (data.hearts || 0) + 1,
+    heartUids: has ? arrayRemove(uid) : arrayUnion(uid),
+    hearts: increment(has ? -1 : 1),
   });
 }
 
@@ -426,14 +687,197 @@ export async function getSafetyPlan(uid) {
   return snap.exists() ? snap.data() : null;
 }
 
-// ----------------- Helper ratings (anonymous) -----------------
+// ----------------- Helper-only supervision wall -----------------
 
-export async function rateHelper({ helperUid, fromUid, chatId, stars, note }) {
-  if (isDemo) return mock.rateHelper({ helperUid, fromUid, chatId, stars, note });
-  return addDoc(collection(db, 'ratings'), {
-    helperUid, fromUid, chatId, stars, note: note || '',
+export async function createHelperWallPost({ uid, displayName, body, kind = 'reflection' }) {
+  if (isDemo) {
+    return mock.createHelperWallPost({ uid, displayName, body, kind });
+  }
+  return addDoc(collection(db, 'helperWall'), {
+    uid,
+    displayName: displayName || 'A helper',
+    body: String(body || '').slice(0, 1500),
+    kind,
     ts: serverTimestamp(),
   });
+}
+
+export function watchHelperWallPosts(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listHelperWallPosts());
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'helperWall'), orderBy('ts', 'desc'), fbLimit(50));
+  return onSnapshot(q, (snap) =>
+    cb(
+      snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        ts: d.data().ts?.toMillis?.() ?? Date.now(),
+      })),
+    ),
+  );
+}
+
+export async function deleteHelperWallPost(id) {
+  if (isDemo) return mock.deleteHelperWallPost(id);
+  return deleteDoc(doc(db, 'helperWall', id));
+}
+
+// ----------------- Companion memory (opt-in, owner-only, client-side) -----------------
+//
+// All writes are to companionMemory/{uid}/items/{auto}. Rules confine
+// reads + writes to the owner. No Cloud Function needed — wipe is a
+// client-side batched delete.
+
+export async function saveCompanionMemoryItem({ topic, note }) {
+  if (isDemo) return { ok: true };
+  const uid = auth?.currentUser?.uid;
+  if (!uid) throw new Error('Sign in.');
+  const t = String(topic || '').slice(0, 120).trim();
+  const n = String(note || '').slice(0, 400).trim();
+  if (!t) throw new Error('Topic is required.');
+  await addDoc(collection(db, `companionMemory/${uid}/items`), {
+    topic: t,
+    note: n,
+    ts: serverTimestamp(),
+  });
+  return { ok: true };
+}
+
+export async function wipeCompanionMemory() {
+  if (isDemo) return { ok: true, deleted: 0 };
+  const uid = auth?.currentUser?.uid;
+  if (!uid) throw new Error('Sign in.');
+  const ref = collection(db, `companionMemory/${uid}/items`);
+  const snap = await getDocs(ref);
+  // Firestore batches max out at 500 ops — chunk if larger.
+  let i = 0;
+  while (i < snap.docs.length) {
+    const batch = writeBatch(db);
+    for (const d of snap.docs.slice(i, i + 400)) batch.delete(d.ref);
+    await batch.commit();
+    i += 400;
+  }
+  // Flip the opt-in flag off too.
+  await updateDoc(doc(db, 'users', uid), { companionMemoryEnabled: false });
+  return { ok: true, deleted: snap.size };
+}
+
+export function watchCompanionMemory(uid, cb) {
+  if (isDemo) {
+    cb([]);
+    return () => {};
+  }
+  const q = query(
+    collection(db, `companionMemory/${uid}/items`),
+    orderBy('ts', 'desc'),
+    fbLimit(20),
+  );
+  return onSnapshot(q, (snap) =>
+    cb(
+      snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        ts: d.data().ts?.toMillis?.() ?? null,
+      })),
+    ),
+  );
+}
+
+// ----------------- Backfill helper (admin-driven, client-side) -----------------
+//
+// One-shot copy of every /users doc into /usersPublic for users that
+// existed before this code shipped. Admin runs it once from the Admin
+// dashboard. Rules allow admins to write any /usersPublic doc, so this
+// works on Spark with no Cloud Function.
+export async function backfillPublicProfiles() {
+  if (isDemo) return { ok: true, written: 0 };
+  const meUid = auth?.currentUser?.uid;
+  if (!meUid) throw new Error('Sign in.');
+  const meSnap = await getDoc(doc(db, 'users', meUid));
+  if (meSnap.data()?.role !== 'admin') {
+    throw new Error('Admins only.');
+  }
+  const usersSnap = await getDocs(collection(db, 'users'));
+  let written = 0;
+  let i = 0;
+  while (i < usersSnap.docs.length) {
+    const batch = writeBatch(db);
+    for (const d of usersSnap.docs.slice(i, i + 400)) {
+      batch.set(
+        doc(db, 'usersPublic', d.id),
+        {
+          uid: d.id,
+          ...projectPublicFields(d.data()),
+          syncedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      written++;
+    }
+    await batch.commit();
+    i += 400;
+  }
+  return { ok: true, written };
+}
+
+// ----------------- Helper ratings (anonymous to helper) -----------------
+//
+// Goal: the helper sees their ratings (stars + note) but NEVER which
+// user submitted which rating. On Spark we can't strip fields server-
+// side, so we use a client-driven dual-write inside a Firestore batch:
+//
+//   /ratings/{detId}                               — admin-only read,
+//                                                    contains fromUid
+//   /usersPublic/{helperUid}/ratings/{detId}       — helper-readable,
+//                                                    fromUid OMITTED
+//
+// Rules:
+//   • /ratings/{id}: read = isAdmin only.
+//   • /usersPublic/{x}/ratings/{y}: rule rejects any doc that includes
+//     a fromUid field, so the client cannot accidentally leak it.
+//
+// Even if a helper bypasses the UI and reads Firestore directly, they
+// hit zero rules-permitted paths to fromUid.
+//
+// detId is deterministic — `${fromUid}__${helperUid}__${chatId}` —
+// so a re-rate from the same chat upserts instead of spamming.
+
+export async function rateHelper({ helperUid, chatId, stars, note }) {
+  if (isDemo) return mock.rateHelper({ helperUid, fromUid: null, chatId, stars, note });
+  const fromUid = auth?.currentUser?.uid;
+  if (!fromUid) throw new Error('Sign in to submit a rating.');
+  if (helperUid === fromUid) throw new Error("You can't rate yourself.");
+  const s = Number(stars);
+  if (!Number.isInteger(s) || s < 1 || s > 5) {
+    throw new Error('Stars must be 1–5.');
+  }
+  const cleanNote = String(note || '').slice(0, 600);
+  const detId = `${fromUid}__${helperUid}__${chatId || 'no-chat'}`;
+  const ts = serverTimestamp();
+
+  const batch = writeBatch(db);
+  // Private (admin-only) — has fromUid for abuse review.
+  batch.set(doc(db, 'ratings', detId), {
+    fromUid,
+    helperUid,
+    chatId: chatId || null,
+    stars: s,
+    note: cleanNote,
+    ts,
+  });
+  // Public anonymized mirror — explicitly NO fromUid so rules accept it.
+  batch.set(doc(db, `usersPublic/${helperUid}/ratings`, detId), {
+    helperUid,
+    stars: s,
+    note: cleanNote,
+    ts,
+  });
+  await batch.commit();
+  return { ok: true };
 }
 
 export function watchRatingsFor(helperUid, cb) {
@@ -443,8 +887,126 @@ export function watchRatingsFor(helperUid, cb) {
     send();
     return unsub;
   }
-  const q = query(collection(db, 'ratings'), where('helperUid', '==', helperUid));
+  // Read the anonymized public mirror — never the raw /ratings collection.
+  const q = query(collection(db, `usersPublic/${helperUid}/ratings`));
   return onSnapshot(q, (snap) => cb(snap.docs.map((d) => d.data())));
+}
+
+// ----------------- Library (helper-authored, admin-approved) -----------------
+//
+// Users see only approved articles + exercises and can heart them.
+// Helpers compose and submit; their drafts and submitted posts are
+// private until an admin approves. The collection is `library`.
+
+function normalizeLibraryPost(d) {
+  const data = d.data ? d.data() : d;
+  const id = d.id ?? data.id;
+  return {
+    ...data,
+    id,
+    createdAt: data.createdAt?.toMillis?.() ?? data.createdAt ?? null,
+    approvedAt: data.approvedAt?.toMillis?.() ?? data.approvedAt ?? null,
+  };
+}
+
+export async function createLibraryPost({ authorUid, authorName, kind, title, body }) {
+  if (isDemo) return mock.createLibraryPost({ authorUid, authorName, kind, title, body });
+  return addDoc(collection(db, 'library'), {
+    authorUid,
+    authorName: authorName || 'Helper',
+    kind, // 'article' | 'exercise'
+    title,
+    body,
+    status: 'submitted',
+    createdAt: serverTimestamp(),
+    approvedAt: null,
+    approvedBy: null,
+    likes: 0,
+    likeUids: [],
+  });
+}
+
+export async function updateLibraryPost(id, fields) {
+  if (isDemo) return mock.updateLibraryPost(id, fields);
+  return updateDoc(doc(db, 'library', id), fields);
+}
+
+export async function deleteLibraryPost(id) {
+  if (isDemo) return mock.deleteLibraryPost(id);
+  return deleteDoc(doc(db, 'library', id));
+}
+
+export async function approveLibraryPost(id, adminUid) {
+  if (isDemo) return mock.approveLibraryPost(id, adminUid);
+  return updateDoc(doc(db, 'library', id), {
+    status: 'approved',
+    approvedAt: serverTimestamp(),
+    approvedBy: adminUid,
+  });
+}
+
+export async function rejectLibraryPost(id) {
+  if (isDemo) return mock.rejectLibraryPost(id);
+  return updateDoc(doc(db, 'library', id), { status: 'rejected' });
+}
+
+// Toggle the calling user's like on an approved post. Uses
+// arrayUnion / arrayRemove + a counter so we don't need a transaction.
+export async function toggleLibraryLike(id, uid, currentlyLiked) {
+  if (isDemo) return mock.toggleLibraryLike(id, uid, currentlyLiked);
+  return updateDoc(doc(db, 'library', id), {
+    likeUids: currentlyLiked ? arrayRemove(uid) : arrayUnion(uid),
+    likes: increment(currentlyLiked ? -1 : 1),
+  });
+}
+
+// All approved posts, newest first, for browsing by users.
+export function watchApprovedLibrary(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listLibrary({ status: 'approved' }));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'library'), where('status', '==', 'approved'));
+  return onSnapshot(q, (s) => {
+    const rows = s.docs.map(normalizeLibraryPost);
+    rows.sort((a, b) => (b.approvedAt ?? b.createdAt ?? 0) - (a.approvedAt ?? a.createdAt ?? 0));
+    cb(rows);
+  });
+}
+
+// Submitted (= awaiting review) posts for the admin queue.
+export function watchPendingLibrary(cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listLibrary({ status: 'submitted' }));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'library'), where('status', '==', 'submitted'));
+  return onSnapshot(q, (s) => {
+    const rows = s.docs.map(normalizeLibraryPost);
+    rows.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    cb(rows);
+  });
+}
+
+// All posts authored by `uid`, regardless of status, for the helper's
+// own dashboard view.
+export function watchMyLibrary(uid, cb) {
+  if (isDemo) {
+    const send = () => cb(mock.listLibrary({ authorUid: uid }));
+    const unsub = mock.subscribe(send);
+    send();
+    return unsub;
+  }
+  const q = query(collection(db, 'library'), where('authorUid', '==', uid));
+  return onSnapshot(q, (s) => {
+    const rows = s.docs.map(normalizeLibraryPost);
+    rows.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    cb(rows);
+  });
 }
 
 // ----------------- Resources / Helplines -----------------

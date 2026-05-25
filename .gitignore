@@ -5,3 +5,11 @@ dist
 .DS_Store
 *.log
 .firebase
+
+# Cloudflare Worker artifacts
+worker/.wrangler
+worker/.dev.vars
+
+# Playwright artifacts
+playwright-report/
+test-results/

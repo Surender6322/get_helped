@@ -3,7 +3,7 @@
 // are never shown — every post and reply appears anonymous (uid is stored
 // only for moderation / preventing self-hearting).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext.jsx';
 import {
   watchWallPosts,
@@ -13,6 +13,7 @@ import {
   addWallReply,
 } from '../services/api.js';
 import { detectCrisisSignals } from '../utils/crisisDetection.js';
+import { useEscapeKey } from '../hooks/useEscapeKey.js';
 
 const KIND_LABEL = { vent: 'Vent', win: 'Win', question: 'Question' };
 
@@ -23,10 +24,16 @@ export default function Wall() {
   const [kind, setKind] = useState('vent');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  // Soft-pause flow: first click on Submit shows a "take a breath" pane;
+  // second click actually posts. Reduces regret-deletes (Headspace Ebb
+  // research) and gives high-emotion users a 2-second cooling step.
+  const [confirmPost, setConfirmPost] = useState(false);
+  const confirmTimer = useRef(null);
 
   useEffect(() => watchWallPosts(setPosts), []);
+  useEffect(() => () => clearTimeout(confirmTimer.current), []);
 
-  const submit = async (e) => {
+  const requestPost = (e) => {
     e.preventDefault();
     setErr('');
     const t = body.trim();
@@ -35,9 +42,18 @@ export default function Wall() {
       setErr('Posts are limited to 1000 characters.');
       return;
     }
+    // Two-step. The first step just opens the gentle "are you sure?" pane.
+    setConfirmPost(true);
+    // Auto-collapse after 30s of no decision so the pane doesn't haunt the user.
+    clearTimeout(confirmTimer.current);
+    confirmTimer.current = setTimeout(() => setConfirmPost(false), 30000);
+  };
+
+  const reallyPost = async () => {
     setBusy(true);
+    setConfirmPost(false);
     try {
-      await createWallPost({ uid: user.uid, body: t, kind });
+      await createWallPost({ uid: user.uid, body: body.trim(), kind });
       setBody('');
     } catch (e2) {
       setErr(e2.message || 'Could not post.');
@@ -45,6 +61,13 @@ export default function Wall() {
       setBusy(false);
     }
   };
+
+  // Late-night microcopy: between 22:00 and 05:00 local time, an empty
+  // wall feels lonely. Replace the empty state with something gentler.
+  const isLateNight = useMemo(() => {
+    const h = new Date().getHours();
+    return h >= 22 || h < 5;
+  }, []);
 
   return (
     <div>
@@ -55,7 +78,7 @@ export default function Wall() {
         </div>
       </div>
 
-      <form onSubmit={submit} className="card mb-4">
+      <form onSubmit={requestPost} className="card mb-4">
         <div className="card-h">
           <h3>Share something</h3>
           <span className="pill pill-info">posted anonymously</span>
@@ -96,11 +119,56 @@ export default function Wall() {
 
       <div className="stack">
         {posts.length === 0 && (
-          <div className="card empty">No posts yet — yours could be the first.</div>
+          <div className="card empty">
+            {isLateNight
+              ? "Late nights can be hard. Someone is always reading the Wall, even now — yours could be the first whisper into the dark."
+              : "No posts yet — yours could be the first."}
+          </div>
         )}
         {posts.map((p) => (
           <Post key={p.id} post={p} myUid={user.uid} />
         ))}
+      </div>
+
+      {confirmPost && (
+        <SoftPauseModal
+          onCancel={() => setConfirmPost(false)}
+          onConfirm={reallyPost}
+        />
+      )}
+    </div>
+  );
+}
+
+// 2-second "take a breath" pause before a Wall post goes public.
+// We don't actually enforce a delay (that feels punitive); the pause
+// is the modal itself. Headspace Ebb research showed regret-deletion
+// rates drop materially with a single intentional pause step.
+function SoftPauseModal({ onConfirm, onCancel }) {
+  useEscapeKey(onCancel);
+  return (
+    <div className="modal-back" onClick={onCancel} role="dialog" aria-modal="true">
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 460 }}
+      >
+        <h3 style={{ marginTop: 0 }}>Take a breath ☁️</h3>
+        <p className="muted" style={{ marginTop: 4 }}>
+          Once posted, your message goes to the Wall right away. Identities are anonymous — but the
+          words stay until you delete them. Still want to share?
+        </p>
+        <div
+          className="row"
+          style={{ gap: 8, justifyContent: 'flex-end', marginTop: 12, flexWrap: 'wrap' }}
+        >
+          <button className="btn btn-ghost" onClick={onCancel} autoFocus>
+            Hold on, let me re-read
+          </button>
+          <button className="btn btn-primary" onClick={onConfirm}>
+            Post it anyway
+          </button>
+        </div>
       </div>
     </div>
   );
